@@ -1,0 +1,44 @@
+name: watch-groupcall
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Poll and notify
+        run: node scripts/watch.mjs
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_TYPE: ${{ vars.WEBHOOK_TYPE }}
+          TARGET_TITLE: ${{ vars.TARGET_TITLE }}
+          MAX_PAGES: ${{ vars.MAX_PAGES }}
+
+      - name: Commit state
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name  'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add state.json
+            git commit -m "chore: update state"
+            git push
+          else
+            echo 'no state change'
+          fi
