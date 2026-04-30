@@ -17,7 +17,6 @@ const MAX_PAGES = Number(process.env.MAX_PAGES || 80);
 const PAGE_DELAY_MS = Number(process.env.PAGE_DELAY_MS || 250);
 const STATE_PATH = process.env.STATE_PATH || 'state.json';
 const DRY_RUN = process.env.DRY_RUN === '1';
-const SUPPRESS_FIRST_RUN = process.env.SUPPRESS_FIRST_RUN !== '0';
 
 if (!TARGET_TITLE) {
   console.error('TARGET_TITLE is required');
@@ -66,14 +65,25 @@ async function collectMatches() {
   return { matched, pages, total };
 }
 
-async function notify(board, joiners) {
+async function notify(board, kind, prevNum, curNum) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
-  const text =
-    `🟢 「${board.title}」に新規入室\n` +
-    `+${joiners.length}人（現在 ${board.callNum}/${board.callLimit}）\n` +
-    url;
+  const limit = board.callLimit;
+  let text;
+  if (kind === 'started') {
+    text =
+      `🟢 「${board.title}」が始まりました\n` +
+      `0 → ${curNum}/${limit}\n` +
+      url;
+  } else if (kind === 'opened') {
+    text =
+      `🟡 「${board.title}」に空きが出ました\n` +
+      `満室(${prevNum}/${limit}) → ${curNum}/${limit}\n` +
+      url;
+  } else {
+    text = `「${board.title}」 ${prevNum} → ${curNum}/${limit}\n${url}`;
+  }
   if (DRY_RUN || !WEBHOOK_URL) {
-    console.log('[DRY_RUN notify]', text);
+    console.log(`[DRY_RUN notify:${kind}]`, text);
     return;
   }
   const body = WEBHOOK_TYPE === 'slack' ? { text } : { content: text };
@@ -101,7 +111,6 @@ function pruneOld(stateRooms, keepIds, now) {
 async function main() {
   const t0 = Date.now();
   const state = loadState();
-  const isFirstRun = Object.keys(state.rooms).length === 0;
   const { matched, pages, total } = await collectMatches();
   const nowIso = new Date().toISOString();
   const nowMs = Date.parse(nowIso);
@@ -110,13 +119,25 @@ async function main() {
   let notified = 0;
   for (const b of matched) {
     seenIds.add(b._id);
-    const prev = state.rooms[b._id]?.callUserIds ?? [];
-    const cur = b.callUserIds ?? [];
-    const joiners = cur.filter((u) => !prev.includes(u));
-    const shouldNotify =
-      joiners.length > 0 && !(SUPPRESS_FIRST_RUN && isFirstRun && prev.length === 0);
-    if (shouldNotify) {
-      await notify(b, joiners);
+    const prevEntry = state.rooms[b._id];
+    const curUsers = Array.isArray(b.callUserIds) ? b.callUserIds : [];
+    const curNum = curUsers.length;             // canonical "現在の人数"
+    const limit = Number(b.callLimit) || 0;
+
+    if (!prevEntry) {
+      // 初めて見るルーム: 状態だけ記録、通知はしない
+      continue;
+    }
+    const prevNum = Number.isFinite(prevEntry.callNum) ? prevEntry.callNum : 0;
+    const wasEmpty = prevNum === 0;
+    const wasFull = limit > 0 && prevNum >= limit;
+    const isNotFull = limit > 0 && curNum < limit;
+
+    if (wasEmpty && curNum >= 1) {
+      await notify(b, 'started', prevNum, curNum);
+      notified++;
+    } else if (wasFull && isNotFull && curNum >= 1) {
+      await notify(b, 'opened', prevNum, curNum);
       notified++;
     }
   }
@@ -124,10 +145,12 @@ async function main() {
   const carried = pruneOld(state.rooms, seenIds, nowMs);
   const newState = { updatedAt: nowIso, rooms: { ...carried } };
   for (const b of matched) {
+    const users = Array.isArray(b.callUserIds) ? b.callUserIds : [];
     newState.rooms[b._id] = {
       title: b.title,
-      callUserIds: b.callUserIds ?? [],
-      callNum: b.callNum ?? 0,
+      callUserIds: users,
+      callNum: users.length,
+      callLimit: Number(b.callLimit) || 0,
       lastSeenAt: nowIso,
     };
   }
@@ -136,7 +159,7 @@ async function main() {
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(
     `scanned ${pages} pages (${total} rooms), matched title=${matched.length}, ` +
-      `notified=${notified}, firstRun=${isFirstRun}, elapsed=${elapsed}s`,
+      `notified=${notified}, elapsed=${elapsed}s`,
   );
 }
 

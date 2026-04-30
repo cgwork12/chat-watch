@@ -1,6 +1,11 @@
 # randomchat-room watcher
 
-randomchat.pnyo.jp のグループ通話で、**タイトル完全一致**で指定したルームに新規参加者があった時、Discord / Slack に Webhook 通知を飛ばす。
+randomchat.pnyo.jp のグループ通話で、**タイトル完全一致**で指定したルームを監視し、以下 2 つのタイミングだけ Discord / Slack に Webhook 通知を飛ばす：
+
+- **0 → 1 以上**（誰もいなかった部屋に人が入って通話開始）
+- **満室 → 空きが出た**（5/5 → 4/5 など）
+
+途中の入退出（1→2、3→2 等）は通知しない。
 
 GitHub Actions の cron（5 分毎）で動作し、無料・Mac 非依存で 24/7 稼働する。
 
@@ -36,9 +41,13 @@ TARGET_TITLE='<タイトル>' DRY_RUN=1 node scripts/watch.mjs
 
 ## 挙動メモ
 
-- 初回実行時（state.json 空）はルーム初回発見の「既存参加者」は通知しない（`SUPPRESS_FIRST_RUN=1` がデフォルト）
-- 2 回目以降、`callUserIds` に前回無かった UUID が増えたら通知
-- 同じタイトルの部屋が複数あれば、全てに対して通知
+- 「現在の人数」は `callUserIds.length` を正本として扱う（API の `callNum` フィールドではなく実際のユーザー UUID 配列の長さ）
+- 通知が飛ぶのは次の 2 ケースのみ
+  - **`started`**: 前回 0 人 → 今回 1 人以上（🟢）
+  - **`opened`**: 前回が満室（人数 = callLimit）→ 今回 callLimit 未満（🟡）
+- それ以外のトランジション（1→2、3→1、2→2、満室維持 など）は通知しない
+- 初めて見つけたルーム（state に未登録）は記録のみ。通知は次回以降の差分から
+- 同じタイトルの部屋が複数あれば、全てに対して個別判定 & 個別通知
 - 24 時間以上見かけなかったルームは state から自動削除
 - cron は `*/5 * * * *`（GitHub の最小間隔）。実際の発火は 5〜15 分ずれることあり
 
@@ -53,7 +62,6 @@ TARGET_TITLE='<タイトル>' DRY_RUN=1 node scripts/watch.mjs
 | `PAGE_DELAY_MS` | `250` | ページ取得間のスリープ |
 | `STATE_PATH` | `state.json` | state ファイル |
 | `DRY_RUN` | なし | `1` にすると Webhook を叩かず stdout 出力 |
-| `SUPPRESS_FIRST_RUN` | `1` | `0` にすると state が空でも既存参加者を通知 |
 
 ## 既知の制約
 
