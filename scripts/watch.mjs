@@ -11,6 +11,7 @@ const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (randomchat-room-watcher)',
 };
 
+const TARGET_ID = process.env.TARGET_ID;
 const TARGET_TITLE = process.env.TARGET_TITLE;
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 const WEBHOOK_TYPE = (process.env.WEBHOOK_TYPE || 'discord').toLowerCase();
@@ -49,7 +50,15 @@ async function collectMatches() {
     const { boards, isLast } = await fetchPage(cursor);
     pages++;
     total += boards.length;
-    for (const b of boards) if (b.title === TARGET_TITLE) matched.push(b);
+    for (const b of boards) {
+      if (TARGET_ID) {
+        if (b._id === TARGET_ID) matched.push(b);
+      } else if (b.title === TARGET_TITLE) {
+        matched.push(b);
+      }
+    }
+    // ID 指定なら 1 件見つけ次第打ち切り（_id は一意のため）
+    if (TARGET_ID && matched.length > 0) break;
     if (isLast || !boards.length) break;
     cursor = boards[boards.length - 1].update;
     if (i < MAX_PAGES - 1) await sleep(PAGE_DELAY_MS);
@@ -133,14 +142,16 @@ function pruneOld(stateRooms, keepIds, now) {
 }
 
 async function main() {
-  if (!TARGET_TITLE) {
-    console.error('TARGET_TITLE is required');
+  if (!TARGET_ID && !TARGET_TITLE) {
+    console.error('TARGET_ID or TARGET_TITLE is required');
     process.exit(1);
   }
   if (!DRY_RUN && !WEBHOOK_URL) {
     console.error('WEBHOOK_URL is required (or set DRY_RUN=1)');
     process.exit(1);
   }
+  const mode = TARGET_ID ? `id=${TARGET_ID}` : `title=${JSON.stringify(TARGET_TITLE)}`;
+  console.log(`watch mode: ${mode}`);
   const t0 = Date.now();
   const state = loadState();
   const { matched, pages, total } = await collectMatches();
@@ -175,7 +186,7 @@ async function main() {
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(
-    `scanned ${pages} pages (${total} rooms), matched title=${matched.length}, ` +
+    `scanned ${pages} pages (${total} rooms), matched=${matched.length}, ` +
       `notified=${notified}, elapsed=${elapsed}s`,
   );
 }

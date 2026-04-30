@@ -1,6 +1,6 @@
 # randomchat-room watcher
 
-randomchat.pnyo.jp のグループ通話で、**タイトル完全一致**で指定したルームを監視し、以下 4 つのタイミングだけ Discord / Slack に Webhook 通知を飛ばす：
+randomchat.pnyo.jp のグループ通話で、**ルーム ID** または **タイトル完全一致**で指定したルームを監視し、以下 4 つのタイミングだけ Discord / Slack に Webhook 通知を飛ばす：
 
 - 🟢 **started**: 0 → 1 以上（誰もいなかった部屋に人が入って通話開始）
 - 🔴 **becameFull**: 人数 < 上限 → 上限到達（満室になった）
@@ -25,17 +25,25 @@ GitHub Actions の cron（5 分毎）で動作し、無料・Mac 非依存で 24
      - `WEBHOOK_URL` = コピーした Webhook URL
    - **Variables** → Repository variables → `New repository variable`
      - `WEBHOOK_TYPE` = `discord` または `slack`
-     - `TARGET_TITLE` = アプリ上のルームタイトル（完全一致、改行・絵文字込み）
+     - **`TARGET_ID` または `TARGET_TITLE` のどちらか**
+       - `TARGET_ID`（推奨）: アプリのルーム URL `https://randomchat.pnyo.jp/groupcall/<ID>` の `<ID>` 部分。タイトルが書き換わる部屋でも安定して追跡可能
+       - `TARGET_TITLE`: ルーム名の完全一致（改行・絵文字込み）。タイトルが変わると追跡失敗
+       - 両方セットされている場合は `TARGET_ID` が優先される
      - `MAX_PAGES` = `80`（任意、未設定でも動く）
 
 4. Actions タブで `watch-groupcall` を有効化（初回は手動で有効化が必要）
 5. `Run workflow` から `workflow_dispatch` で手動実行 → ログで以下を確認
-   - `scanned N pages (M rooms), matched title=X, notified=Y, firstRun=true`
+   - `watch mode: id=...` または `watch mode: title="..."`
+   - `scanned N pages (M rooms), matched=X, notified=Y`
    - `chore: update state` のコミットが生成される
 
 ## ローカルでの smoke test
 
 ```bash
+# ID 監視
+TARGET_ID='<24桁の_id>' DRY_RUN=1 node scripts/watch.mjs
+
+# タイトル監視
 TARGET_TITLE='<タイトル>' DRY_RUN=1 node scripts/watch.mjs
 ```
 
@@ -60,7 +68,8 @@ TARGET_TITLE='<タイトル>' DRY_RUN=1 node scripts/watch.mjs
 
 | 変数 | デフォルト | 説明 |
 |------|-----------|------|
-| `TARGET_TITLE` | **必須** | 監視対象タイトル（完全一致） |
+| `TARGET_ID` | `TARGET_TITLE` とどちらか必須 | 監視対象ルームの `_id`（推奨）。指定時はタイトルチェックは無視、見つけ次第ページング打ち切り |
+| `TARGET_TITLE` | `TARGET_ID` とどちらか必須 | 監視対象タイトル（完全一致）。同名ルーム複数あれば全てに通知 |
 | `WEBHOOK_URL` | **必須**（DRY_RUN 時除く） | 通知先 |
 | `WEBHOOK_TYPE` | `discord` | `discord` / `slack` |
 | `MAX_PAGES` | `80` | 1 回の実行で舐める最大ページ数 |
