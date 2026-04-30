@@ -1,12 +1,12 @@
 {
-  "updatedAt": "2026-04-30T10:30:36.845Z",
+  "updatedAt": "2026-04-30T11:11:34.757Z",
   "rooms": {
     "699244bce7401621a87adf10": {
       "title": "ながら雑談",
       "callUserIds": [],
       "callNum": 0,
       "callLimit": 5,
-      "lastSeenAt": "2026-04-30T10:30:36.845Z"
+      "lastSeenAt": "2026-04-30T11:11:34.757Z"
     }
   }
 }
