@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const BASE = 'https://rc.pnyo.jp/api/web/boards/calls';
 const HEADERS = {
@@ -17,15 +18,6 @@ const MAX_PAGES = Number(process.env.MAX_PAGES || 80);
 const PAGE_DELAY_MS = Number(process.env.PAGE_DELAY_MS || 250);
 const STATE_PATH = process.env.STATE_PATH || 'state.json';
 const DRY_RUN = process.env.DRY_RUN === '1';
-
-if (!TARGET_TITLE) {
-  console.error('TARGET_TITLE is required');
-  process.exit(1);
-}
-if (!DRY_RUN && !WEBHOOK_URL) {
-  console.error('WEBHOOK_URL is required (or set DRY_RUN=1)');
-  process.exit(1);
-}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -74,10 +66,20 @@ async function notify(board, kind, prevNum, curNum) {
       `🟢 「${board.title}」が始まりました\n` +
       `0 → ${curNum}/${limit}\n` +
       url;
+  } else if (kind === 'becameFull') {
+    text =
+      `🔴 「${board.title}」が満室になりました\n` +
+      `${prevNum}/${limit} → 満室(${curNum}/${limit})\n` +
+      url;
   } else if (kind === 'opened') {
     text =
       `🟡 「${board.title}」に空きが出ました\n` +
       `満室(${prevNum}/${limit}) → ${curNum}/${limit}\n` +
+      url;
+  } else if (kind === 'ended') {
+    text =
+      `⚫ 「${board.title}」の通話が終了しました\n` +
+      `${prevNum}/${limit} → 0/${limit}\n` +
       url;
   } else {
     text = `「${board.title}」 ${prevNum} → ${curNum}/${limit}\n${url}`;
@@ -97,6 +99,28 @@ async function notify(board, kind, prevNum, curNum) {
   }
 }
 
+// Pure function: decide which transition kind (if any) to notify for.
+// Inputs are the previous state entry (or undefined) and the current board snapshot.
+// Returns { kind, prevNum, curNum } or null if no transition.
+export function decideTransition(prevEntry, board) {
+  const curUsers = Array.isArray(board.callUserIds) ? board.callUserIds : [];
+  const curNum = curUsers.length;
+  const limit = Number(board.callLimit) || 0;
+  if (!prevEntry) return null;
+  const prevNum = Number.isFinite(prevEntry.callNum) ? prevEntry.callNum : 0;
+  const prevLimit = Number.isFinite(prevEntry.callLimit) ? prevEntry.callLimit : limit;
+  const wasEmpty = prevNum === 0;
+  const wasFull = prevLimit > 0 && prevNum >= prevLimit;
+  const isFull = limit > 0 && curNum >= limit;
+  const isEmpty = curNum === 0;
+  let kind = null;
+  if (!wasEmpty && isEmpty) kind = 'ended';
+  else if (!wasFull && isFull) kind = 'becameFull';
+  else if (wasEmpty && curNum >= 1) kind = 'started';
+  else if (wasFull && !isFull && curNum >= 1) kind = 'opened';
+  return kind ? { kind, prevNum, curNum } : null;
+}
+
 function pruneOld(stateRooms, keepIds, now) {
   const cutoff = now - 24 * 60 * 60 * 1000;
   const out = {};
@@ -109,6 +133,14 @@ function pruneOld(stateRooms, keepIds, now) {
 }
 
 async function main() {
+  if (!TARGET_TITLE) {
+    console.error('TARGET_TITLE is required');
+    process.exit(1);
+  }
+  if (!DRY_RUN && !WEBHOOK_URL) {
+    console.error('WEBHOOK_URL is required (or set DRY_RUN=1)');
+    process.exit(1);
+  }
   const t0 = Date.now();
   const state = loadState();
   const { matched, pages, total } = await collectMatches();
@@ -120,24 +152,9 @@ async function main() {
   for (const b of matched) {
     seenIds.add(b._id);
     const prevEntry = state.rooms[b._id];
-    const curUsers = Array.isArray(b.callUserIds) ? b.callUserIds : [];
-    const curNum = curUsers.length;             // canonical "現在の人数"
-    const limit = Number(b.callLimit) || 0;
-
-    if (!prevEntry) {
-      // 初めて見るルーム: 状態だけ記録、通知はしない
-      continue;
-    }
-    const prevNum = Number.isFinite(prevEntry.callNum) ? prevEntry.callNum : 0;
-    const wasEmpty = prevNum === 0;
-    const wasFull = limit > 0 && prevNum >= limit;
-    const isNotFull = limit > 0 && curNum < limit;
-
-    if (wasEmpty && curNum >= 1) {
-      await notify(b, 'started', prevNum, curNum);
-      notified++;
-    } else if (wasFull && isNotFull && curNum >= 1) {
-      await notify(b, 'opened', prevNum, curNum);
+    const decision = decideTransition(prevEntry, b);
+    if (decision) {
+      await notify(b, decision.kind, decision.prevNum, decision.curNum);
       notified++;
     }
   }
@@ -163,7 +180,11 @@ async function main() {
   );
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Run main() only when executed directly (not when imported for tests)
+if (import.meta.url === `file://${process.argv[1]}` ||
+    process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
