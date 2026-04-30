@@ -1,16 +1,17 @@
 {
-  "updatedAt": "2026-04-30T16:39:06.029Z",
+  "updatedAt": "2026-04-30T17:08:31.846Z",
   "rooms": {
     "699244bce7401621a87adf10": {
       "title": "ながら雑談",
       "callUserIds": [
-        "20131a1c-0070-4b0d-b2f5-c35200ebf090",
+        "5c9f6f48-64e8-40ab-a48b-0f1dec11abb6",
         "2f134a3b-6be0-4bcb-ae07-565076240ccd",
-        "5c9f6f48-64e8-40ab-a48b-0f1dec11abb6"
+        "f1daf9b6-e717-4ca4-a12d-22a75cf8034c",
+        "20131a1c-0070-4b0d-b2f5-c35200ebf090"
       ],
-      "callNum": 3,
+      "callNum": 4,
       "callLimit": 5,
-      "lastSeenAt": "2026-04-30T16:39:06.029Z"
+      "lastSeenAt": "2026-04-30T17:08:31.846Z"
     }
   }
 }
