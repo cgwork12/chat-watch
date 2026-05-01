@@ -1,5 +1,5 @@
 // Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
-import { decideTransition, extractRoomFromHtml, buildText } from '../src/index.js';
+import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName } from '../src/index.js';
 
 const board = (id, title, n, limit) => ({
   _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
@@ -150,6 +150,83 @@ for (const [label, gen, expected] of textCases) {
     console.log('   --- output ---');
     console.log('   ' + (typeof text === 'string' ? text.replace(/\n/g, '\n   ') : String(text)));
   }
+  if (ok) pass++; else fail++;
+}
+
+// ---------- attemptAttribution ----------
+
+const mkMsg = (num, color, char, isHost = false) => ({
+  num, create: '2026-05-01T00:00:00Z',
+  userIcon: { color, char, isHost },
+});
+
+const attribCases = [
+  ['1 join + 1 fresh icon -> mapped',
+    { lastMessageNum: 100, uuidToIcon: {} },
+    [u(1)],
+    [mkMsg(100, '#0fb9b1', '渡辺'), mkMsg(101, '#0fb9b1', '渡辺')],   // last seen num 100, msg 101 is new
+    (r) => r.mapping[u(1)]?.char === '渡辺' && r.mapping[u(1)]?.color === '#0fb9b1'],
+
+  ['1 join but no new chat -> not mapped',
+    { lastMessageNum: 100, uuidToIcon: {} },
+    [u(1)],
+    [mkMsg(100, '#0fb9b1', '渡辺')],   // nothing newer than 100
+    (r) => !r.mapping[u(1)]],
+
+  ['2 joiners + 1 new icon -> ambiguous, not mapped',
+    { lastMessageNum: 100, uuidToIcon: {} },
+    [u(1), u(2)],
+    [mkMsg(101, '#2d98da', '鈴木')],
+    (r) => !r.mapping[u(1)] && !r.mapping[u(2)]],
+
+  ['existing icon already mapped -> next joiner not falsely linked',
+    { lastMessageNum: 100, uuidToIcon: { [u(0)]: { color: '#0fb9b1', char: '渡辺', isHost: false } } },
+    [u(1)],
+    [mkMsg(101, '#0fb9b1', '渡辺')],   // only icon is the already-mapped one; no candidate left
+    (r) => !r.mapping[u(1)]],
+
+  ['lastMessageNum is updated to max',
+    { lastMessageNum: 100, uuidToIcon: {} },
+    [],
+    [mkMsg(105, '#0fb9b1', 'A'), mkMsg(110, '#fc5c65', 'B')],
+    (r) => r.lastMessageNum === 110],
+];
+
+for (const [label, prev, joined, msgs, check] of attribCases) {
+  const r = attemptAttribution(prev, joined, msgs);
+  const ok = check(r);
+  console.log(`${ok ? '✅' : '❌'} attrib: ${label}`);
+  if (!ok) console.log('   ', JSON.stringify(r, null, 2).slice(0, 400));
+  if (ok) pass++; else fail++;
+}
+
+// ---------- renderUuidWithIcon / colorName ----------
+{
+  const m = { [u(1)]: { color: '#0fb9b1', char: '渡辺', isHost: false }, [u(2)]: { color: '#d1d8e0', char: '主', isHost: true } };
+  const r1 = renderUuidWithIcon(u(1), m);
+  const r2 = renderUuidWithIcon(u(2), m);
+  const r3 = renderUuidWithIcon(u(99), m);  // no mapping
+  const ok1 = r1.includes(u(1)) && r1.includes('ティール') && r1.includes('渡辺');
+  const ok2 = r2.includes(u(2)) && r2.includes('グレー') && r2.includes('主') && r2.includes('👑');
+  const ok3 = r3 === u(99);
+  console.log(`${ok1 ? '✅' : '❌'} render: mapped renders "色 名前"  ->  ${r1}`);
+  console.log(`${ok2 ? '✅' : '❌'} render: host adds 👑           ->  ${r2}`);
+  console.log(`${ok3 ? '✅' : '❌'} render: unmapped returns raw uuid  ->  ${r3}`);
+  if (ok1) pass++; else fail++;
+  if (ok2) pass++; else fail++;
+  if (ok3) pass++; else fail++;
+}
+
+// buildText with mapping
+{
+  const m = { [u(1)]: { color: '#0fb9b1', char: '渡辺', isHost: false } };
+  const t = buildText(makeBoard([u(1)], 5),
+    { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
+    makePrev([], 5),
+    m);
+  const ok = /\+ 入室:.*ティール 渡辺/.test(t);
+  console.log(`${ok ? '✅' : '❌'} buildText with mapping renders icon next to UUID`);
+  if (!ok) { console.log('   ', t.replace(/\n/g, '\n    ')); }
   if (ok) pass++; else fail++;
 }
 
