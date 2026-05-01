@@ -173,6 +173,26 @@ export function buildText(board, decision, prev) {
   return `「${board.title}」 ${prevNum} → ${curNum}/${limit}\n${url}`;
 }
 
+// Capture-mode notification: every callUserIds change (any +join / -leave),
+// with full UUIDs so the user can identify who's who.
+export function buildCaptureText(board, prev) {
+  const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
+  const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
+  const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
+  const limit = Number(board.callLimit) || 0;
+  const prevSet = new Set(prevIds);
+  const curSet = new Set(curIds);
+  const joined = curIds.filter((u) => !prevSet.has(u));
+  const left = prevIds.filter((u) => !curSet.has(u));
+  if (joined.length === 0 && left.length === 0) return null;
+  const lines = [`🔍 [UID捕獲モード] 「${board.title}」 ${prevIds.length}/${limit} → ${curIds.length}/${limit}`];
+  for (const u of joined) lines.push(`+ 入室: ${u}`);
+  for (const u of left) lines.push(`- 退室: ${u}`);
+  if (curIds.length > 0) lines.push(`👥 全員:\n${curIds.map((u) => `  ${u}`).join('\n')}`);
+  lines.push(url);
+  return lines.join('\n');
+}
+
 async function postWebhook(env, text) {
   const url = env.WEBHOOK_URL;
   if (!url) throw new Error('WEBHOOK_URL is required');
@@ -192,6 +212,8 @@ async function postWebhook(env, text) {
 
 export async function handleCron(env) {
   const t0 = Date.now();
+  // Capture mode flag is a KV key with TTL; presence = on, absence = off.
+  const captureMode = !!(await env.STATE.get('mode:capture'));
   const { matched, pages, total } = await findMatched(env);
   let notified = 0;
 
@@ -199,14 +221,25 @@ export async function handleCron(env) {
     const stateKey = `room:${board._id}`;
     const prevRaw = await env.STATE.get(stateKey);
     const prev = prevRaw ? JSON.parse(prevRaw) : null;
-    const decision = decideTransition(prev, board);
-    if (decision) {
-      // Fall back to previously-known title if SSR extraction missed it
-      const titleForDisplay = board.title || prev?.title || '(タイトル不明)';
-      const text = buildText({ ...board, title: titleForDisplay }, decision, prev);
-      const ok = await postWebhook(env, text);
-      if (ok) notified++;
-      console.log(`[${decision.kind}] ${titleForDisplay} ${decision.prevNum}->${decision.curNum}/${decision.limit}`);
+    const titleForDisplay = board.title || prev?.title || '(タイトル不明)';
+
+    if (captureMode) {
+      const text = buildCaptureText({ ...board, title: titleForDisplay }, prev);
+      if (text) {
+        const ok = await postWebhook(env, text);
+        if (ok) notified++;
+        const curIds = board.callUserIds || [];
+        const prevIds = prev?.callUserIds || [];
+        console.log(`[capture] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}`);
+      }
+    } else {
+      const decision = decideTransition(prev, board);
+      if (decision) {
+        const text = buildText({ ...board, title: titleForDisplay }, decision, prev);
+        const ok = await postWebhook(env, text);
+        if (ok) notified++;
+        console.log(`[${decision.kind}] ${titleForDisplay} ${decision.prevNum}->${decision.curNum}/${decision.limit}`);
+      }
     }
     const users = Array.isArray(board.callUserIds) ? board.callUserIds : [];
     const next = {
@@ -224,7 +257,8 @@ export async function handleCron(env) {
   // re-appears in the list the diff will fire normally.
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(`scanned ${pages} pages (${total} rooms), matched=${matched.length}, notified=${notified}, elapsed=${elapsed}s`);
+  const modeTag = captureMode ? ' [capture-mode]' : '';
+  console.log(`scanned ${pages} pages (${total} rooms), matched=${matched.length}, notified=${notified}, elapsed=${elapsed}s${modeTag}`);
 }
 
 export default {

@@ -157,3 +157,38 @@ on:
 | `TARGET_TITLE` | var | `TARGET_ID` とどちらか必須 | タイトル完全一致 |
 | `MAX_PAGES` | var | `80` | 1 回の poll で舐める最大ページ数 |
 | `RUN_TOKEN` | secret | (任意) | POST /run の Bearer 認証用 |
+
+### UID 捕獲モード（一時的に全入退室を通知）
+
+普段は上の 4 トランジションだけ通知するが、**自分の UUID を特定したい時**などに、一時的に「入退室を全部・フル UUID で通知する」モードに切り替えられる。
+
+```bash
+# 30 分だけ捕獲モード ON（デフォルト 30 分、最大 1440 分）
+node scripts/capture.mjs on
+node scripts/capture.mjs on 60     # 60 分
+
+# 状態確認
+node scripts/capture.mjs status
+
+# 早めに OFF
+node scripts/capture.mjs off
+```
+
+仕組み：
+- KV に `mode:capture` キーを TTL 付きで書く
+- Worker は毎 cron 実行前に存在チェック → ON なら捕獲モード分岐
+- TTL 経過で自動消滅（つけっぱなし防止）
+
+捕獲モード時の通知フォーマット例：
+```
+🔍 [UID捕獲モード] 「ながら雑談」 3/5 → 4/5
++ 入室: 5e3c9ad9-6799-4b1a-930e-1413359f30f4
+👥 全員:
+  119a30b3-d725-49a4-aaed-dbd0d0561eba
+  5c9f6f48-64e8-40ab-a48b-0f1dec11abb6
+  26c6ec94-26d1-4620-90da-e82a8dfd256e
+  5e3c9ad9-6799-4b1a-930e-1413359f30f4
+https://randomchat.pnyo.jp/groupcall/...
+```
+
+通常モードでは `+ 入室` / `- 退室` 系の細かい通知は出ず、4 トランジションだけ。

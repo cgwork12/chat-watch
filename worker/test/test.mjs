@@ -1,5 +1,5 @@
 // Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
-import { decideTransition, extractRoomFromHtml, buildText } from '../src/index.js';
+import { decideTransition, extractRoomFromHtml, buildText, buildCaptureText } from '../src/index.js';
 
 const board = (id, title, n, limit) => ({
   _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
@@ -125,6 +125,50 @@ for (const [label, gen, ...patterns] of textCases) {
     console.log('   --- output ---');
     console.log('   ' + text.replace(/\n/g, '\n   '));
     for (const p of patterns) if (!p.test(text)) console.log('   missing pattern:', p);
+  }
+  if (ok) pass++; else fail++;
+}
+
+// ---------- buildCaptureText ----------
+
+const captureCases = [
+  ['no change -> null',
+    () => buildCaptureText(makeBoard(['aaaaaaaa-bbbb', 'cccccccc-dddd'], 5), makePrev(['aaaaaaaa-bbbb', 'cccccccc-dddd'], 5)),
+    null],
+
+  ['join only',
+    () => buildCaptureText(makeBoard(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'ffffffff-1111-2222-3333-444444444444'], 5),
+      makePrev(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], 5)),
+    [/🔍 \[UID捕獲モード\]/, /1\/5 → 2\/5/, /\+ 入室: ffffffff-1111-2222-3333-444444444444/, /👥 全員:/]],
+
+  ['leave only',
+    () => buildCaptureText(makeBoard(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], 5),
+      makePrev(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'ffffffff-1111-2222-3333-444444444444'], 5)),
+    [/2\/5 → 1\/5/, /- 退室: ffffffff-1111-2222-3333-444444444444/, /👥 全員:/]],
+
+  ['simultaneous swap',
+    () => buildCaptureText(makeBoard(['aaaaaaaa-1111-2222-3333-444444444444', 'cccccccc-1111-2222-3333-444444444444'], 5),
+      makePrev(['aaaaaaaa-1111-2222-3333-444444444444', 'bbbbbbbb-1111-2222-3333-444444444444'], 5)),
+    [/2\/5 → 2\/5/, /\+ 入室: cccccccc-1111-2222-3333-444444444444/, /- 退室: bbbbbbbb-1111-2222-3333-444444444444/]],
+
+  ['all leave (room empties)',
+    () => buildCaptureText(makeBoard([], 5),
+      makePrev(['aaaaaaaa-1111-2222-3333-444444444444', 'bbbbbbbb-1111-2222-3333-444444444444'], 5)),
+    [/2\/5 → 0\/5/, /- 退室: aaaaaaaa-1111-2222-3333-444444444444/, /- 退室: bbbbbbbb-1111-2222-3333-444444444444/]],
+];
+
+for (const [label, gen, expected] of captureCases) {
+  const text = gen();
+  let ok;
+  if (expected === null) {
+    ok = text === null;
+  } else {
+    ok = typeof text === 'string' && expected.every((re) => re.test(text));
+  }
+  console.log(`${ok ? '✅' : '❌'} capture: ${label}`);
+  if (!ok) {
+    console.log('   --- output ---');
+    console.log('   ' + (typeof text === 'string' ? text.replace(/\n/g, '\n   ') : String(text)));
   }
   if (ok) pass++; else fail++;
 }
