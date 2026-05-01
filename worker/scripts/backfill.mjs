@@ -19,20 +19,13 @@
 //   node scripts/backfill.mjs --apply --notify  # also send report to Discord
 import { spawnSync } from 'node:child_process';
 
+import fs from 'node:fs';
+
 const sub = process.argv[2];
 const apply = process.argv.includes('--apply');
 const notify = process.argv.includes('--notify');
 
-// Subcommand: bind  uuid_prefix  color_hex  char  [--host]
-//   Manually attach an icon to a UUID (use when you've eyeballed who's who).
-if (sub === 'bind') {
-  await manualBind();
-  process.exit(0);
-}
-
 // We piggyback on wrangler.toml for TARGET_ID and KV namespace binding name.
-// Read TARGET_ID from wrangler.toml [vars].
-import fs from 'node:fs';
 const wt = fs.readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
 const targetId = (wt.match(/TARGET_ID\s*=\s*"([^"]+)"/) || [])[1];
 if (!targetId) {
@@ -46,18 +39,24 @@ function wrangler(args) {
 }
 
 function kvGet(key) {
-  const r = wrangler(['kv', 'key', 'get', '--binding=STATE', key]);
+  const r = wrangler(['kv', 'key', 'get', '--binding=STATE', '--preview=false', key]);
   if (r.code !== 0) return null;
   return r.stdout;
 }
 function kvPut(key, value) {
   // wrangler accepts the value as the next positional arg
-  const r = wrangler(['kv', 'key', 'put', '--binding=STATE', key, value]);
+  const r = wrangler(['kv', 'key', 'put', '--binding=STATE', '--preview=false', key, value]);
   if (r.code !== 0) {
     console.error('KV put failed:', r.stderr || r.stdout);
     return false;
   }
   return true;
+}
+
+// Subcommand: bind <uuid_or_prefix> <#color> <name> [--host]
+if (sub === 'bind') {
+  await manualBind();
+  process.exit(0);
 }
 
 // ---------- helpers (mirror src/index.js) ----------

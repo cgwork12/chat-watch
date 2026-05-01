@@ -317,11 +317,8 @@ export async function handleCron(env) {
         console.warn(`fetchChatMessages failed: ${e.message}`);
       }
     }
-    // Drop mappings for UUIDs that have left the call (free state space)
-    if (Object.keys(mapping).length > 0) {
-      const curSet = new Set(curIds);
-      for (const k of Object.keys(mapping)) if (!curSet.has(k)) delete mapping[k];
-    }
+    // (Mappings are kept across leaves — same person often comes back with the
+    // same UUID, and KV storage is essentially free at this scale.)
 
     const decision = decideTransition(prev, board);
     const text = buildText({ ...board, title: titleForDisplay }, decision, prev, mapping);
