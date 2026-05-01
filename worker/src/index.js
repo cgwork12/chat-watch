@@ -1,0 +1,183 @@
+// Cloudflare Worker: 1-minute reliable cron that polls rc.pnyo.jp,
+// detects 4 transition kinds, and posts to a Discord webhook (or Slack).
+//
+// Why this exists:
+//   GitHub Actions scheduled workflows are best-effort and on public free-tier
+//   accounts can be delayed 20-30 minutes between fires. Cloudflare Worker cron
+//   runs every 60 seconds reliably.
+//
+// Setup (see ../README.md):
+//   wrangler kv namespace create STATE     -> id      -> wrangler.toml
+//   wrangler kv namespace create STATE --preview -> preview_id
+//   wrangler secret put WEBHOOK_URL
+//   wrangler secret put TARGET_ID         (or TARGET_TITLE)
+//   wrangler deploy
+//
+// State key schema in KV (binding STATE):
+//   key "room:<id>"   value JSON {title, callNum, callLimit, callUserIds, lastSeenAt}
+
+const API_BASE = 'https://rc.pnyo.jp/api/web/boards/calls';
+const HEADERS = {
+  'Authorization': 'Bearer ',
+  'Accept': 'application/json',
+  'Origin': 'https://randomchat.pnyo.jp',
+  'Referer': 'https://randomchat.pnyo.jp/',
+  'User-Agent': 'Mozilla/5.0 (chat-watch-worker)',
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchPage(cursor) {
+  const url = cursor ? `${API_BASE}?lastUpdate=${encodeURIComponent(cursor)}` : API_BASE;
+  const res = await fetch(url, { headers: HEADERS });
+  if (!res.ok) throw new Error(`boards/calls ${res.status}`);
+  return res.json();
+}
+
+async function findMatched(env) {
+  const targetId = env.TARGET_ID || '';
+  const targetTitle = env.TARGET_TITLE || '';
+  if (!targetId && !targetTitle) throw new Error('TARGET_ID or TARGET_TITLE is required');
+  const maxPages = Number(env.MAX_PAGES || 80);
+  const matched = [];
+  let cursor = null;
+  let pages = 0;
+  let total = 0;
+  for (let i = 0; i < maxPages; i++) {
+    const { boards, isLast } = await fetchPage(cursor);
+    pages++;
+    total += boards.length;
+    for (const b of boards) {
+      if (targetId) {
+        if (b._id === targetId) matched.push(b);
+      } else if (b.title === targetTitle) {
+        matched.push(b);
+      }
+    }
+    if (targetId && matched.length > 0) break;
+    if (isLast || !boards.length) break;
+    cursor = boards[boards.length - 1].update;
+    if (i < maxPages - 1) await sleep(200);
+  }
+  return { matched, pages, total };
+}
+
+// Same transition decision as scripts/watch.mjs (priority: ended > becameFull > started > opened)
+export function decideTransition(prev, board) {
+  const curUsers = Array.isArray(board.callUserIds) ? board.callUserIds : [];
+  const curNum = curUsers.length;
+  const limit = Number(board.callLimit) || 0;
+  if (!prev) return null;
+  const prevNum = Number.isFinite(prev.callNum) ? prev.callNum : 0;
+  const prevLimit = Number.isFinite(prev.callLimit) ? prev.callLimit : limit;
+  const wasEmpty = prevNum === 0;
+  const wasFull = prevLimit > 0 && prevNum >= prevLimit;
+  const isFull = limit > 0 && curNum >= limit;
+  const isEmpty = curNum === 0;
+  let kind = null;
+  if (!wasEmpty && isEmpty) kind = 'ended';
+  else if (!wasFull && isFull) kind = 'becameFull';
+  else if (wasEmpty && curNum >= 1) kind = 'started';
+  else if (wasFull && !isFull && curNum >= 1) kind = 'opened';
+  return kind ? { kind, prevNum, curNum, limit } : null;
+}
+
+function buildText(board, decision) {
+  const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
+  const { kind, prevNum, curNum, limit } = decision;
+  if (kind === 'started') {
+    return `🟢 「${board.title}」が始まりました\n0 → ${curNum}/${limit}\n${url}`;
+  } else if (kind === 'becameFull') {
+    return `🔴 「${board.title}」が満室になりました\n${prevNum}/${limit} → 満室(${curNum}/${limit})\n${url}`;
+  } else if (kind === 'opened') {
+    return `🟡 「${board.title}」に空きが出ました\n満室(${prevNum}/${limit}) → ${curNum}/${limit}\n${url}`;
+  } else if (kind === 'ended') {
+    return `⚫ 「${board.title}」の通話が終了しました\n${prevNum}/${limit} → 0/${limit}\n${url}`;
+  }
+  return `「${board.title}」 ${prevNum} → ${curNum}/${limit}\n${url}`;
+}
+
+async function postWebhook(env, text) {
+  const url = env.WEBHOOK_URL;
+  if (!url) throw new Error('WEBHOOK_URL is required');
+  const type = (env.WEBHOOK_TYPE || 'discord').toLowerCase();
+  const body = type === 'slack' ? { text } : { content: text };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    console.warn(`webhook ${res.status}: ${t.slice(0, 200)}`);
+  }
+  return res.ok;
+}
+
+export async function handleCron(env) {
+  const t0 = Date.now();
+  const { matched, pages, total } = await findMatched(env);
+  let notified = 0;
+
+  for (const board of matched) {
+    const stateKey = `room:${board._id}`;
+    const prevRaw = await env.STATE.get(stateKey);
+    const prev = prevRaw ? JSON.parse(prevRaw) : null;
+    const decision = decideTransition(prev, board);
+    if (decision) {
+      const text = buildText(board, decision);
+      const ok = await postWebhook(env, text);
+      if (ok) notified++;
+      console.log(`[${decision.kind}] ${board.title} ${decision.prevNum}->${decision.curNum}/${decision.limit}`);
+    }
+    const users = Array.isArray(board.callUserIds) ? board.callUserIds : [];
+    const next = {
+      title: board.title,
+      callUserIds: users,
+      callNum: users.length,
+      callLimit: Number(board.callLimit) || 0,
+      lastSeenAt: new Date().toISOString(),
+    };
+    await env.STATE.put(stateKey, JSON.stringify(next));
+  }
+
+  // For matchByTitle, missing rooms (= room ended/disappeared) handling could go here.
+  // For matchById (single room), if not found we just leave state as-is — when the room
+  // re-appears in the list the diff will fire normally.
+
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`scanned ${pages} pages (${total} rooms), matched=${matched.length}, notified=${notified}, elapsed=${elapsed}s`);
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/health') {
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/run') {
+      // Manual trigger — guard with a shared secret in env.RUN_TOKEN
+      const auth = request.headers.get('Authorization') || '';
+      const token = (env.RUN_TOKEN || '').trim();
+      if (!token || auth !== `Bearer ${token}`) {
+        return new Response('unauthorized', { status: 401 });
+      }
+      try {
+        await handleCron(env);
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: String(e) }), {
+          status: 500, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+    return new Response('Not Found', { status: 404 });
+  },
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(handleCron(env));
+  },
+};
