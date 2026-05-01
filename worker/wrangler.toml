@@ -1,6 +1,8 @@
 name = "chat-watch-worker"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
+# This worker runs only via cron triggers; no HTTP entry point exposed.
+workers_dev = false
 
 # Cron: every minute
 [triggers]
@@ -12,14 +14,13 @@ crons = ["*/1 * * * *"]
 # Then paste the IDs below.
 [[kv_namespaces]]
 binding = "STATE"
-id = "PUT_KV_ID_HERE"
-preview_id = "PUT_KV_PREVIEW_ID_HERE"
+id = "60a062f5f1b44f1eab6f5f281c99017d"
+preview_id = "32b15cf3d3a24666a248cc102ea875bc"
 
 [vars]
 MAX_PAGES = "80"
 WEBHOOK_TYPE = "discord"
-# TARGET_TITLE can also be put here as plain text if you prefer (not a secret).
-# TARGET_ID    = "699244bce7401621a87adf10"
+TARGET_ID = "699244bce7401621a87adf10"
 
 # Worker secrets (do NOT put values here):
 #   wrangler secret put WEBHOOK_URL    # Discord webhook URL

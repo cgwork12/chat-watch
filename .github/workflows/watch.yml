@@ -1,8 +1,10 @@
 name: watch-groupcall
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
+  # NOTE: cron disabled because the Cloudflare Worker (worker/) now polls every minute.
+  # Re-enable by uncommenting if the Worker ever stops working.
+  # schedule:
+  #   - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
 permissions:
