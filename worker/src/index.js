@@ -27,6 +27,56 @@ const HEADERS = {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ---------------------------------------------------------------------------
+// Strategy A: When watching by ID, hit the per-room SSR HTML page directly.
+//   1 subrequest per cron tick, regardless of where the room is in the list.
+//   The page is `cache-control: no-cache, no-store` so it's always fresh.
+//
+//   The board record is embedded in the Next.js streaming bundle as JSON
+//   inside JS strings, so values appear with `\"` escaping.
+// ---------------------------------------------------------------------------
+
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+export function extractRoomFromHtml(html, id) {
+  if (!html.includes(id)) return null;
+  // Anchor on the room's _id, then capture callUserIds and callLimit that
+  // appear later within a bounded window (same JSON object).
+  const blockRe = new RegExp(
+    `\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?callUserIds\\\\":\\[([^\\]]*)\\][\\s\\S]{0,500}?callLimit\\\\":(\\d+)`,
+  );
+  const m = html.match(blockRe);
+  if (!m) return null;
+  const callUserIds = m[1].match(UUID_RE) || [];
+  const callLimit = Number(m[2]);
+  // Title is right after _id. Best effort; fall back to empty.
+  let title = '';
+  const tm = html.match(
+    new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\",\\\\"title\\\\":\\\\"([\\s\\S]*?)\\\\",\\\\"category\\\\"`),
+  );
+  if (tm) {
+    try { title = JSON.parse('"' + tm[1] + '"'); } catch { title = tm[1]; }
+  }
+  return { _id: id, title, callUserIds, callLimit };
+}
+
+async function fetchRoomById(id) {
+  const url = `https://randomchat.pnyo.jp/groupcall/${id}?_=${Date.now()}`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': HEADERS['User-Agent'], 'Cache-Control': 'no-cache' },
+    cf: { cacheTtl: 0, cacheEverything: false },
+  });
+  if (!res.ok) throw new Error(`groupcall page ${res.status}`);
+  const html = await res.text();
+  return extractRoomFromHtml(html, id);
+}
+
+// ---------------------------------------------------------------------------
+// Strategy B: When watching by title, paginate the API list and match exactly.
+//   Used only when TARGET_ID is not set. Keep MAX_PAGES small to fit free-plan
+//   CPU limit.
+// ---------------------------------------------------------------------------
+
 async function fetchPage(cursor) {
   const url = cursor ? `${API_BASE}?lastUpdate=${encodeURIComponent(cursor)}` : API_BASE;
   const res = await fetch(url, { headers: HEADERS });
@@ -34,11 +84,7 @@ async function fetchPage(cursor) {
   return res.json();
 }
 
-async function findMatched(env) {
-  const targetId = env.TARGET_ID || '';
-  const targetTitle = env.TARGET_TITLE || '';
-  if (!targetId && !targetTitle) throw new Error('TARGET_ID or TARGET_TITLE is required');
-  const maxPages = Number(env.MAX_PAGES || 80);
+async function findByTitle(targetTitle, maxPages) {
   const matched = [];
   let cursor = null;
   let pages = 0;
@@ -47,19 +93,26 @@ async function findMatched(env) {
     const { boards, isLast } = await fetchPage(cursor);
     pages++;
     total += boards.length;
-    for (const b of boards) {
-      if (targetId) {
-        if (b._id === targetId) matched.push(b);
-      } else if (b.title === targetTitle) {
-        matched.push(b);
-      }
-    }
-    if (targetId && matched.length > 0) break;
+    for (const b of boards) if (b.title === targetTitle) matched.push(b);
     if (isLast || !boards.length) break;
     cursor = boards[boards.length - 1].update;
     if (i < maxPages - 1) await sleep(200);
   }
   return { matched, pages, total };
+}
+
+async function findMatched(env) {
+  const targetId = env.TARGET_ID || '';
+  const targetTitle = env.TARGET_TITLE || '';
+  if (!targetId && !targetTitle) throw new Error('TARGET_ID or TARGET_TITLE is required');
+  if (targetId) {
+    const room = await fetchRoomById(targetId);
+    if (!room) return { matched: [], pages: 1, total: 0, mode: 'id' };
+    return { matched: [room], pages: 1, total: 1, mode: 'id' };
+  }
+  const maxPages = Number(env.MAX_PAGES || 10);
+  const r = await findByTitle(targetTitle, maxPages);
+  return { ...r, mode: 'title' };
 }
 
 // Same transition decision as scripts/watch.mjs (priority: ended > becameFull > started > opened)
@@ -125,14 +178,16 @@ export async function handleCron(env) {
     const prev = prevRaw ? JSON.parse(prevRaw) : null;
     const decision = decideTransition(prev, board);
     if (decision) {
-      const text = buildText(board, decision);
+      // Fall back to previously-known title if SSR extraction missed it
+      const titleForDisplay = board.title || prev?.title || '(タイトル不明)';
+      const text = buildText({ ...board, title: titleForDisplay }, decision);
       const ok = await postWebhook(env, text);
       if (ok) notified++;
-      console.log(`[${decision.kind}] ${board.title} ${decision.prevNum}->${decision.curNum}/${decision.limit}`);
+      console.log(`[${decision.kind}] ${titleForDisplay} ${decision.prevNum}->${decision.curNum}/${decision.limit}`);
     }
     const users = Array.isArray(board.callUserIds) ? board.callUserIds : [];
     const next = {
-      title: board.title,
+      title: board.title || prev?.title || '',
       callUserIds: users,
       callNum: users.length,
       callLimit: Number(board.callLimit) || 0,
