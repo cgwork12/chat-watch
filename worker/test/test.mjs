@@ -1,5 +1,5 @@
 // Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
-import { decideTransition, extractRoomFromHtml, buildText, buildCaptureText } from '../src/index.js';
+import { decideTransition, extractRoomFromHtml, buildText } from '../src/index.js';
 
 const board = (id, title, n, limit) => ({
   _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
@@ -84,7 +84,7 @@ for (const [label, html, expected] of htmlCases) {
   if (ok) pass++; else fail++;
 }
 
-// ---------- buildText (notification body w/ UUID details) ----------
+// ---------- buildText (unified notification builder) ----------
 
 function makeBoard(uuids, limit, title = 't') {
   return { _id: 'roomid', title, callUserIds: uuids, callLimit: limit };
@@ -92,72 +92,52 @@ function makeBoard(uuids, limit, title = 't') {
 function makePrev(uuids, limit, title = 't') {
   return { callUserIds: uuids, callNum: uuids.length, callLimit: limit, title };
 }
+const u = (n) => `${'a'.repeat(8)}-bbbb-cccc-dddd-${String(n).padStart(12, '0')}`;
+const v = (c, n) => `${c.repeat(8)}-bbbb-cccc-dddd-${String(n).padStart(12, '0')}`;
 
 const textCases = [
-  ['started includes current uuids',
-    () => buildText(makeBoard(['aaaaaaaa-bbbb', 'cccccccc-dddd'], 5), { kind: 'started', prevNum: 0, curNum: 2, limit: 5 }, makePrev([], 5)),
-    /🟢/, /0 → 2\/5/, /👤 aaaaaaaa, cccccccc/],
-
-  ['becameFull shows joined and full list',
-    () => buildText(makeBoard(['aaaaaaaa', 'bbbbbbbb', 'cccccccc', 'dddddddd', 'eeeeeeee'], 5),
-      { kind: 'becameFull', prevNum: 4, curNum: 5, limit: 5 },
-      makePrev(['aaaaaaaa', 'bbbbbbbb', 'cccccccc', 'dddddddd'], 5)),
-    /🔴/, /\+ 入室: eeeeeeee/, /👥 全員: aaaaaaaa, bbbbbbbb, cccccccc, dddddddd, eeeeeeee/],
-
-  ['opened shows who left and remaining',
-    () => buildText(makeBoard(['aaaaaaaa', 'bbbbbbbb', 'cccccccc'], 5),
-      { kind: 'opened', prevNum: 5, curNum: 3, limit: 5 },
-      makePrev(['aaaaaaaa', 'bbbbbbbb', 'cccccccc', 'dddddddd', 'eeeeeeee'], 5)),
-    /🟡/, /- 退室: dddddddd, eeeeeeee/, /👥 残り: aaaaaaaa, bbbbbbbb, cccccccc/],
-
-  ['ended shows who left',
-    () => buildText(makeBoard([], 5),
-      { kind: 'ended', prevNum: 2, curNum: 0, limit: 5 },
-      makePrev(['aaaaaaaa', 'bbbbbbbb'], 5)),
-    /⚫/, /2\/5 → 0\/5/, /退室: aaaaaaaa, bbbbbbbb/],
-];
-
-for (const [label, gen, ...patterns] of textCases) {
-  const text = gen();
-  const ok = patterns.every((p) => p.test(text));
-  console.log(`${ok ? '✅' : '❌'} ${label}`);
-  if (!ok) {
-    console.log('   --- output ---');
-    console.log('   ' + text.replace(/\n/g, '\n   '));
-    for (const p of patterns) if (!p.test(text)) console.log('   missing pattern:', p);
-  }
-  if (ok) pass++; else fail++;
-}
-
-// ---------- buildCaptureText ----------
-
-const captureCases = [
   ['no change -> null',
-    () => buildCaptureText(makeBoard(['aaaaaaaa-bbbb', 'cccccccc-dddd'], 5), makePrev(['aaaaaaaa-bbbb', 'cccccccc-dddd'], 5)),
+    () => buildText(makeBoard([u(1), u(2)], 5), null, makePrev([u(1), u(2)], 5)),
     null],
 
-  ['join only',
-    () => buildCaptureText(makeBoard(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'ffffffff-1111-2222-3333-444444444444'], 5),
-      makePrev(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], 5)),
-    [/🔍 \[UID捕獲モード\]/, /1\/5 → 2\/5/, /\+ 入室: ffffffff-1111-2222-3333-444444444444/, /👥 全員:/]],
+  ['started uses 🟢 wording with full UUIDs',
+    () => buildText(makeBoard([u(1)], 5),
+      { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
+      makePrev([], 5)),
+    [/🟢.*が始まりました/, new RegExp(`\\+ 入室: ${u(1)}`), /👥 全員:/]],
 
-  ['leave only',
-    () => buildCaptureText(makeBoard(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], 5),
-      makePrev(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'ffffffff-1111-2222-3333-444444444444'], 5)),
-    [/2\/5 → 1\/5/, /- 退室: ffffffff-1111-2222-3333-444444444444/, /👥 全員:/]],
+  ['becameFull uses 🔴 wording',
+    () => buildText(makeBoard([u(1), u(2), u(3), u(4), u(5)], 5),
+      { kind: 'becameFull', prevNum: 4, curNum: 5, limit: 5 },
+      makePrev([u(1), u(2), u(3), u(4)], 5)),
+    [/🔴.*が満室になりました/, new RegExp(`\\+ 入室: ${u(5)}`), /4\/5 → 満室\(5\/5\)/]],
 
-  ['simultaneous swap',
-    () => buildCaptureText(makeBoard(['aaaaaaaa-1111-2222-3333-444444444444', 'cccccccc-1111-2222-3333-444444444444'], 5),
-      makePrev(['aaaaaaaa-1111-2222-3333-444444444444', 'bbbbbbbb-1111-2222-3333-444444444444'], 5)),
-    [/2\/5 → 2\/5/, /\+ 入室: cccccccc-1111-2222-3333-444444444444/, /- 退室: bbbbbbbb-1111-2222-3333-444444444444/]],
+  ['opened uses 🟡 wording with leavers',
+    () => buildText(makeBoard([u(1), u(2), u(3)], 5),
+      { kind: 'opened', prevNum: 5, curNum: 3, limit: 5 },
+      makePrev([u(1), u(2), u(3), u(4), u(5)], 5)),
+    [/🟡.*に空きが出ました/, new RegExp(`- 退室: ${u(4)}`), new RegExp(`- 退室: ${u(5)}`)]],
 
-  ['all leave (room empties)',
-    () => buildCaptureText(makeBoard([], 5),
-      makePrev(['aaaaaaaa-1111-2222-3333-444444444444', 'bbbbbbbb-1111-2222-3333-444444444444'], 5)),
-    [/2\/5 → 0\/5/, /- 退室: aaaaaaaa-1111-2222-3333-444444444444/, /- 退室: bbbbbbbb-1111-2222-3333-444444444444/]],
+  ['ended uses ⚫ wording with full UUIDs of leavers',
+    () => buildText(makeBoard([], 5),
+      { kind: 'ended', prevNum: 2, curNum: 0, limit: 5 },
+      makePrev([u(1), u(2)], 5)),
+    [/⚫.*の通話が終了しました/, new RegExp(`- 退室: ${u(1)}`), /2\/5 → 0\/5/]],
+
+  ['middle change (1 -> 2) uses 🔵 generic header',
+    () => buildText(makeBoard([u(1), u(2)], 5), null, makePrev([u(1)], 5)),
+    [/🔵.*1\/5 → 2\/5/, new RegExp(`\\+ 入室: ${u(2)}`)]],
+
+  ['middle leave (3 -> 2) uses 🔵',
+    () => buildText(makeBoard([u(1), u(2)], 5), null, makePrev([u(1), u(2), u(3)], 5)),
+    [/🔵.*3\/5 → 2\/5/, new RegExp(`- 退室: ${u(3)}`)]],
+
+  ['simultaneous swap (count unchanged) still notifies',
+    () => buildText(makeBoard([v('a', 1), v('c', 2)], 5), null, makePrev([v('a', 1), v('b', 2)], 5)),
+    [/🔵.*2\/5 → 2\/5/, new RegExp(`\\+ 入室: ${v('c', 2)}`), new RegExp(`- 退室: ${v('b', 2)}`)]],
 ];
 
-for (const [label, gen, expected] of captureCases) {
+for (const [label, gen, expected] of textCases) {
   const text = gen();
   let ok;
   if (expected === null) {
@@ -165,7 +145,7 @@ for (const [label, gen, expected] of captureCases) {
   } else {
     ok = typeof text === 'string' && expected.every((re) => re.test(text));
   }
-  console.log(`${ok ? '✅' : '❌'} capture: ${label}`);
+  console.log(`${ok ? '✅' : '❌'} ${label}`);
   if (!ok) {
     console.log('   --- output ---');
     console.log('   ' + (typeof text === 'string' ? text.replace(/\n/g, '\n   ') : String(text)));

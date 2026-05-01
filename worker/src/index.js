@@ -135,47 +135,10 @@ export function decideTransition(prev, board) {
   return kind ? { kind, prevNum, curNum, limit } : null;
 }
 
-// Show first 8 chars of each UUID for compactness — still unique in a room of <=5.
-function shortIds(uuids) {
-  if (!uuids || uuids.length === 0) return '(なし)';
-  return uuids.map((u) => (u || '').slice(0, 8)).join(', ');
-}
-
+// Build notification body. Always fires on any callUserIds change.
+// Uses 4 special transition headers when applicable, else a generic 🔵 header.
+// Returns null if there's no actual change (= no notification needed).
 export function buildText(board, decision, prev) {
-  const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
-  const { kind, prevNum, curNum, limit } = decision;
-  const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
-  const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
-  const prevSet = new Set(prevIds);
-  const curSet = new Set(curIds);
-  const joined = curIds.filter((u) => !prevSet.has(u));
-  const left = prevIds.filter((u) => !curSet.has(u));
-  if (kind === 'started') {
-    return `🟢 「${board.title}」が始まりました\n0 → ${curNum}/${limit}\n👤 ${shortIds(curIds)}\n${url}`;
-  } else if (kind === 'becameFull') {
-    const lines = [`🔴 「${board.title}」が満室になりました`, `${prevNum}/${limit} → 満室(${curNum}/${limit})`];
-    if (joined.length > 0) lines.push(`+ 入室: ${shortIds(joined)}`);
-    lines.push(`👥 全員: ${shortIds(curIds)}`);
-    lines.push(url);
-    return lines.join('\n');
-  } else if (kind === 'opened') {
-    const lines = [`🟡 「${board.title}」に空きが出ました`, `満室(${prevNum}/${limit}) → ${curNum}/${limit}`];
-    if (left.length > 0) lines.push(`- 退室: ${shortIds(left)}`);
-    lines.push(`👥 残り: ${shortIds(curIds)}`);
-    lines.push(url);
-    return lines.join('\n');
-  } else if (kind === 'ended') {
-    const lines = [`⚫ 「${board.title}」の通話が終了しました`, `${prevNum}/${limit} → 0/${limit}`];
-    if (left.length > 0) lines.push(`退室: ${shortIds(left)}`);
-    lines.push(url);
-    return lines.join('\n');
-  }
-  return `「${board.title}」 ${prevNum} → ${curNum}/${limit}\n${url}`;
-}
-
-// Capture-mode notification: every callUserIds change (any +join / -leave),
-// with full UUIDs so the user can identify who's who.
-export function buildCaptureText(board, prev) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
@@ -185,10 +148,26 @@ export function buildCaptureText(board, prev) {
   const joined = curIds.filter((u) => !prevSet.has(u));
   const left = prevIds.filter((u) => !curSet.has(u));
   if (joined.length === 0 && left.length === 0) return null;
-  const lines = [`🔍 [UID捕獲モード] 「${board.title}」 ${prevIds.length}/${limit} → ${curIds.length}/${limit}`];
+
+  let header;
+  if (decision?.kind === 'started') {
+    header = `🟢 「${board.title}」が始まりました\n0 → ${curIds.length}/${limit}`;
+  } else if (decision?.kind === 'becameFull') {
+    header = `🔴 「${board.title}」が満室になりました\n${prevIds.length}/${limit} → 満室(${curIds.length}/${limit})`;
+  } else if (decision?.kind === 'opened') {
+    header = `🟡 「${board.title}」に空きが出ました\n満室(${prevIds.length}/${limit}) → ${curIds.length}/${limit}`;
+  } else if (decision?.kind === 'ended') {
+    header = `⚫ 「${board.title}」の通話が終了しました\n${prevIds.length}/${limit} → 0/${limit}`;
+  } else {
+    header = `🔵 「${board.title}」 ${prevIds.length}/${limit} → ${curIds.length}/${limit}`;
+  }
+
+  const lines = [header];
   for (const u of joined) lines.push(`+ 入室: ${u}`);
   for (const u of left) lines.push(`- 退室: ${u}`);
-  if (curIds.length > 0) lines.push(`👥 全員:\n${curIds.map((u) => `  ${u}`).join('\n')}`);
+  if (curIds.length > 0) {
+    lines.push(`👥 全員:\n${curIds.map((u) => `  ${u}`).join('\n')}`);
+  }
   lines.push(url);
   return lines.join('\n');
 }
@@ -212,8 +191,6 @@ async function postWebhook(env, text) {
 
 export async function handleCron(env) {
   const t0 = Date.now();
-  // Capture mode flag is a KV key with TTL; presence = on, absence = off.
-  const captureMode = !!(await env.STATE.get('mode:capture'));
   const { matched, pages, total } = await findMatched(env);
   let notified = 0;
 
@@ -223,23 +200,15 @@ export async function handleCron(env) {
     const prev = prevRaw ? JSON.parse(prevRaw) : null;
     const titleForDisplay = board.title || prev?.title || '(タイトル不明)';
 
-    if (captureMode) {
-      const text = buildCaptureText({ ...board, title: titleForDisplay }, prev);
-      if (text) {
-        const ok = await postWebhook(env, text);
-        if (ok) notified++;
-        const curIds = board.callUserIds || [];
-        const prevIds = prev?.callUserIds || [];
-        console.log(`[capture] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}`);
-      }
-    } else {
-      const decision = decideTransition(prev, board);
-      if (decision) {
-        const text = buildText({ ...board, title: titleForDisplay }, decision, prev);
-        const ok = await postWebhook(env, text);
-        if (ok) notified++;
-        console.log(`[${decision.kind}] ${titleForDisplay} ${decision.prevNum}->${decision.curNum}/${decision.limit}`);
-      }
+    const decision = decideTransition(prev, board);
+    const text = buildText({ ...board, title: titleForDisplay }, decision, prev);
+    if (text) {
+      const ok = await postWebhook(env, text);
+      if (ok) notified++;
+      const tag = decision?.kind || 'change';
+      const curIds = board.callUserIds || [];
+      const prevIds = prev?.callUserIds || [];
+      console.log(`[${tag}] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}`);
     }
     const users = Array.isArray(board.callUserIds) ? board.callUserIds : [];
     const next = {
@@ -257,8 +226,7 @@ export async function handleCron(env) {
   // re-appears in the list the diff will fire normally.
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-  const modeTag = captureMode ? ' [capture-mode]' : '';
-  console.log(`scanned ${pages} pages (${total} rooms), matched=${matched.length}, notified=${notified}, elapsed=${elapsed}s${modeTag}`);
+  console.log(`scanned ${pages} pages (${total} rooms), matched=${matched.length}, notified=${notified}, elapsed=${elapsed}s`);
 }
 
 export default {

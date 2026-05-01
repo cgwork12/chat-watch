@@ -158,30 +158,23 @@ on:
 | `MAX_PAGES` | var | `80` | 1 回の poll で舐める最大ページ数 |
 | `RUN_TOKEN` | secret | (任意) | POST /run の Bearer 認証用 |
 
-### UID 捕獲モード（一時的に全入退室を通知）
+### 通知フォーマット（Worker 版）
 
-普段は上の 4 トランジションだけ通知するが、**自分の UUID を特定したい時**などに、一時的に「入退室を全部・フル UUID で通知する」モードに切り替えられる。
+**Worker 版は `callUserIds` に何らかの変化があれば毎回通知**する（人数の増減だけでなく、誰かが出入りしたら必ず）。  
+ヘッダ絵文字で 4 種の遷移を識別、それ以外の出入りは 🔵：
 
-```bash
-# 30 分だけ捕獲モード ON（デフォルト 30 分、最大 1440 分）
-node scripts/capture.mjs on
-node scripts/capture.mjs on 60     # 60 分
+| 状況 | ヘッダ |
+|------|--------|
+| 0 → N | 🟢 が始まりました |
+| 上限到達（becameFull） | 🔴 が満室になりました |
+| 満室 → 上限未満 | 🟡 に空きが出ました |
+| N → 0 | ⚫ の通話が終了しました |
+| その他（1→2、3→2、入れ替わり等） | 🔵 |
 
-# 状態確認
-node scripts/capture.mjs status
+通知本文には **+ 入室 / - 退室 のフル UUID** と **👥 全員のフル UUID** を含む。例：
 
-# 早めに OFF
-node scripts/capture.mjs off
 ```
-
-仕組み：
-- KV に `mode:capture` キーを TTL 付きで書く
-- Worker は毎 cron 実行前に存在チェック → ON なら捕獲モード分岐
-- TTL 経過で自動消滅（つけっぱなし防止）
-
-捕獲モード時の通知フォーマット例：
-```
-🔍 [UID捕獲モード] 「ながら雑談」 3/5 → 4/5
+🔵 「ながら雑談」 3/5 → 4/5
 + 入室: 5e3c9ad9-6799-4b1a-930e-1413359f30f4
 👥 全員:
   119a30b3-d725-49a4-aaed-dbd0d0561eba
@@ -191,4 +184,4 @@ node scripts/capture.mjs off
 https://randomchat.pnyo.jp/groupcall/...
 ```
 
-通常モードでは `+ 入室` / `- 退室` 系の細かい通知は出ず、4 トランジションだけ。
+> 旧 GH Actions 版（`scripts/watch.mjs`）は 4 トランジションのみ通知のまま据え置き。
