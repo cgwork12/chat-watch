@@ -18,7 +18,11 @@ id = "60a062f5f1b44f1eab6f5f281c99017d"
 preview_id = "32b15cf3d3a24666a248cc102ea875bc"
 
 [vars]
-MAX_PAGES = "80"
+# Free plan has 10ms CPU per request. Scanning 80 pages exceeds it.
+# 10 pages is enough in practice: when a room's state changes, its `update`
+# field is bumped and it jumps to page 1. So if we miss it on page 11+,
+# nothing happened recently anyway.
+MAX_PAGES = "10"
 WEBHOOK_TYPE = "discord"
 TARGET_ID = "699244bce7401621a87adf10"
 
