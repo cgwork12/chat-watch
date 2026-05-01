@@ -1,5 +1,5 @@
-// Unit tests for the worker's transition logic + SSR HTML extractor.
-import { decideTransition, extractRoomFromHtml } from '../src/index.js';
+// Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
+import { decideTransition, extractRoomFromHtml, buildText } from '../src/index.js';
 
 const board = (id, title, n, limit) => ({
   _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
@@ -81,6 +81,51 @@ for (const [label, html, expected] of htmlCases) {
     ok = r && r.title === expected.title && r.callUserIds.length === expected.n && r.callLimit === expected.limit;
   }
   console.log(`${ok ? '✅' : '❌'} ${label}: expected=${JSON.stringify(expected)}, got=${r ? JSON.stringify({ title: r.title, n: r.callUserIds.length, limit: r.callLimit }) : null}`);
+  if (ok) pass++; else fail++;
+}
+
+// ---------- buildText (notification body w/ UUID details) ----------
+
+function makeBoard(uuids, limit, title = 't') {
+  return { _id: 'roomid', title, callUserIds: uuids, callLimit: limit };
+}
+function makePrev(uuids, limit, title = 't') {
+  return { callUserIds: uuids, callNum: uuids.length, callLimit: limit, title };
+}
+
+const textCases = [
+  ['started includes current uuids',
+    () => buildText(makeBoard(['aaaaaaaa-bbbb', 'cccccccc-dddd'], 5), { kind: 'started', prevNum: 0, curNum: 2, limit: 5 }, makePrev([], 5)),
+    /🟢/, /0 → 2\/5/, /👤 aaaaaaaa, cccccccc/],
+
+  ['becameFull shows joined and full list',
+    () => buildText(makeBoard(['aaaaaaaa', 'bbbbbbbb', 'cccccccc', 'dddddddd', 'eeeeeeee'], 5),
+      { kind: 'becameFull', prevNum: 4, curNum: 5, limit: 5 },
+      makePrev(['aaaaaaaa', 'bbbbbbbb', 'cccccccc', 'dddddddd'], 5)),
+    /🔴/, /\+ 入室: eeeeeeee/, /👥 全員: aaaaaaaa, bbbbbbbb, cccccccc, dddddddd, eeeeeeee/],
+
+  ['opened shows who left and remaining',
+    () => buildText(makeBoard(['aaaaaaaa', 'bbbbbbbb', 'cccccccc'], 5),
+      { kind: 'opened', prevNum: 5, curNum: 3, limit: 5 },
+      makePrev(['aaaaaaaa', 'bbbbbbbb', 'cccccccc', 'dddddddd', 'eeeeeeee'], 5)),
+    /🟡/, /- 退室: dddddddd, eeeeeeee/, /👥 残り: aaaaaaaa, bbbbbbbb, cccccccc/],
+
+  ['ended shows who left',
+    () => buildText(makeBoard([], 5),
+      { kind: 'ended', prevNum: 2, curNum: 0, limit: 5 },
+      makePrev(['aaaaaaaa', 'bbbbbbbb'], 5)),
+    /⚫/, /2\/5 → 0\/5/, /退室: aaaaaaaa, bbbbbbbb/],
+];
+
+for (const [label, gen, ...patterns] of textCases) {
+  const text = gen();
+  const ok = patterns.every((p) => p.test(text));
+  console.log(`${ok ? '✅' : '❌'} ${label}`);
+  if (!ok) {
+    console.log('   --- output ---');
+    console.log('   ' + text.replace(/\n/g, '\n   '));
+    for (const p of patterns) if (!p.test(text)) console.log('   missing pattern:', p);
+  }
   if (ok) pass++; else fail++;
 }
 

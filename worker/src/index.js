@@ -135,17 +135,40 @@ export function decideTransition(prev, board) {
   return kind ? { kind, prevNum, curNum, limit } : null;
 }
 
-function buildText(board, decision) {
+// Show first 8 chars of each UUID for compactness — still unique in a room of <=5.
+function shortIds(uuids) {
+  if (!uuids || uuids.length === 0) return '(なし)';
+  return uuids.map((u) => (u || '').slice(0, 8)).join(', ');
+}
+
+export function buildText(board, decision, prev) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
   const { kind, prevNum, curNum, limit } = decision;
+  const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
+  const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
+  const prevSet = new Set(prevIds);
+  const curSet = new Set(curIds);
+  const joined = curIds.filter((u) => !prevSet.has(u));
+  const left = prevIds.filter((u) => !curSet.has(u));
   if (kind === 'started') {
-    return `🟢 「${board.title}」が始まりました\n0 → ${curNum}/${limit}\n${url}`;
+    return `🟢 「${board.title}」が始まりました\n0 → ${curNum}/${limit}\n👤 ${shortIds(curIds)}\n${url}`;
   } else if (kind === 'becameFull') {
-    return `🔴 「${board.title}」が満室になりました\n${prevNum}/${limit} → 満室(${curNum}/${limit})\n${url}`;
+    const lines = [`🔴 「${board.title}」が満室になりました`, `${prevNum}/${limit} → 満室(${curNum}/${limit})`];
+    if (joined.length > 0) lines.push(`+ 入室: ${shortIds(joined)}`);
+    lines.push(`👥 全員: ${shortIds(curIds)}`);
+    lines.push(url);
+    return lines.join('\n');
   } else if (kind === 'opened') {
-    return `🟡 「${board.title}」に空きが出ました\n満室(${prevNum}/${limit}) → ${curNum}/${limit}\n${url}`;
+    const lines = [`🟡 「${board.title}」に空きが出ました`, `満室(${prevNum}/${limit}) → ${curNum}/${limit}`];
+    if (left.length > 0) lines.push(`- 退室: ${shortIds(left)}`);
+    lines.push(`👥 残り: ${shortIds(curIds)}`);
+    lines.push(url);
+    return lines.join('\n');
   } else if (kind === 'ended') {
-    return `⚫ 「${board.title}」の通話が終了しました\n${prevNum}/${limit} → 0/${limit}\n${url}`;
+    const lines = [`⚫ 「${board.title}」の通話が終了しました`, `${prevNum}/${limit} → 0/${limit}`];
+    if (left.length > 0) lines.push(`退室: ${shortIds(left)}`);
+    lines.push(url);
+    return lines.join('\n');
   }
   return `「${board.title}」 ${prevNum} → ${curNum}/${limit}\n${url}`;
 }
@@ -180,7 +203,7 @@ export async function handleCron(env) {
     if (decision) {
       // Fall back to previously-known title if SSR extraction missed it
       const titleForDisplay = board.title || prev?.title || '(タイトル不明)';
-      const text = buildText({ ...board, title: titleForDisplay }, decision);
+      const text = buildText({ ...board, title: titleForDisplay }, decision, prev);
       const ok = await postWebhook(env, text);
       if (ok) notified++;
       console.log(`[${decision.kind}] ${titleForDisplay} ${decision.prevNum}->${decision.curNum}/${decision.limit}`);
