@@ -319,16 +319,17 @@ export async function handleCron(env) {
     const prevSet = new Set(prevIds);
     const justJoined = curIds.filter((u) => !prevSet.has(u));
 
-    // Heuristic: try to attach (color, char) chat icons to newly joined UUIDs.
-    // Only fetch chat messages when a join happened (saves a subrequest).
+    // UUID → chat-icon mapping is **manual only by default**. Chat timing is
+    // unreliable (someone may post 30 min after joining, mis-attributing the
+    // join), so we don't want the worker silently writing potentially-wrong
+    // bindings. Set AUTO_ATTRIBUTE_ICONS=1 to opt in to the heuristic.
     let mapping = prev?.uuidToIcon || {};
     let lastMessageNum = Number.isFinite(prev?.lastMessageNum) ? prev.lastMessageNum : 0;
     let attribCount = 0;
-    if (justJoined.length > 0) {
+    if (env.AUTO_ATTRIBUTE_ICONS === '1' && justJoined.length > 0) {
       try {
         const messages = await fetchChatMessages(board._id);
         if (messages) {
-          // sort ascending by num for deterministic new-icon ordering
           messages.sort((a, b) => Number(a.num) - Number(b.num));
           const r = attemptAttribution(prev, justJoined, messages);
           attribCount = Object.keys(r.mapping).length - Object.keys(mapping).length;

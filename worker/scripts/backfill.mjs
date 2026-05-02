@@ -58,6 +58,16 @@ if (sub === 'bind') {
   await manualBind();
   process.exit(0);
 }
+// Subcommand: unbind <uuid_or_prefix>
+if (sub === 'unbind') {
+  await manualUnbind();
+  process.exit(0);
+}
+// Subcommand: list  — show current uuidToIcon mapping
+if (sub === 'list') {
+  await listMapping();
+  process.exit(0);
+}
 
 // ---------- helpers (mirror src/index.js) ----------
 function iconKey(icon) { return `${icon.color}|${icon.char}|${icon.isHost ? 1 : 0}`; }
@@ -159,6 +169,37 @@ if (apply) {
   }
 } else {
   console.log('(dry run; pass --apply to persist)');
+}
+
+async function manualUnbind() {
+  const uuidArg = process.argv[3];
+  if (!uuidArg) { console.error('Usage: node scripts/backfill.mjs unbind <uuid_or_prefix>'); process.exit(2); }
+  const stateRaw = kvGet(`room:${targetId}`);
+  if (!stateRaw) { console.error('no KV state'); process.exit(1); }
+  const state = JSON.parse(stateRaw);
+  const mapping = { ...(state.uuidToIcon || {}) };
+  // Resolve prefix → full UUID
+  const matches = Object.keys(mapping).filter((u) => u === uuidArg || u.startsWith(uuidArg));
+  if (matches.length === 0) { console.error(`no mapping for ${uuidArg}`); process.exit(1); }
+  if (matches.length > 1) { console.error(`ambiguous prefix ${uuidArg}: ${matches.join(', ')}`); process.exit(1); }
+  delete mapping[matches[0]];
+  const next = { ...state, uuidToIcon: mapping };
+  if (kvPut(`room:${targetId}`, JSON.stringify(next))) {
+    console.log(`✅ unbound ${matches[0]}`);
+  }
+}
+
+async function listMapping() {
+  const stateRaw = kvGet(`room:${targetId}`);
+  if (!stateRaw) { console.error('no KV state'); process.exit(1); }
+  const state = JSON.parse(stateRaw);
+  const mapping = state.uuidToIcon || {};
+  const inCall = new Set(state.callUserIds || []);
+  console.log(`mapping (${Object.keys(mapping).length} entries):`);
+  for (const [uuid, ic] of Object.entries(mapping)) {
+    const here = inCall.has(uuid) ? ' [現在通話中]' : '';
+    console.log(`  ${uuid}  →  ${colorName(ic.color)} ${ic.char}${ic.isHost ? ' 👑' : ''}${here}`);
+  }
 }
 
 async function manualBind() {
