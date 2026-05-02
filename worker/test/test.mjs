@@ -230,6 +230,47 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
   if (ok) pass++; else fail++;
 }
 
+// joinCount rendering
+{
+  const m = { [u(1)]: { color: '#0fb9b1', char: '渡辺', isHost: false } };
+  const t = buildText(makeBoard([u(1)], 5),
+    { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
+    makePrev([], 5),
+    m,
+    { [u(1)]: 3 });
+  const ok = /\+ 入室:.*\(3回目\)/.test(t);
+  console.log(`${ok ? '✅' : '❌'} buildText: 入室 shows "(N回目)"`);
+  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
+  if (ok) pass++; else fail++;
+}
+
+{
+  // 退室 should NOT show count
+  const t = buildText(makeBoard([], 5),
+    { kind: 'ended', prevNum: 1, curNum: 0, limit: 5 },
+    makePrev([u(1)], 5),
+    {}, { [u(1)]: 5 });
+  const ok = !/\(5回目\)/.test(t) && /- 退室:/.test(t);
+  console.log(`${ok ? '✅' : '❌'} buildText: 退室 has no (N回目)`);
+  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
+  if (ok) pass++; else fail++;
+}
+
+{
+  // joinCount=0 (or absent) → no suffix
+  const t = buildText(makeBoard([u(1), u(2)], 5),
+    null,
+    makePrev([u(1)], 5),
+    {}, { [u(1)]: 1 });
+  // u(2) joined this tick, has no joinCount entry yet → no suffix
+  const lines = t.split('\n');
+  const joinLine = lines.find((l) => l.startsWith('+ 入室:'));
+  const ok = joinLine && !/\(\d+回目\)/.test(joinLine);
+  console.log(`${ok ? '✅' : '❌'} buildText: 入室 with joinCount=0 omits suffix`);
+  if (!ok) console.log('   joinLine=', joinLine);
+  if (ok) pass++; else fail++;
+}
+
 // ---------- inferAllowedMentions ----------
 {
   const a1 = inferAllowedMentions('@everyone');

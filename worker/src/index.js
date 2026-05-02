@@ -227,9 +227,10 @@ export function decideTransition(prev, board) {
 // Uses 4 special transition headers when applicable, else a generic 🔵 header.
 // Returns null if there's no actual change (= no notification needed).
 //
-// `mapping` is { [uuid]: {color, char, isHost} } — when present, UUIDs are
-// rendered as "uuid (色 苗字)".
-export function buildText(board, decision, prev, mapping) {
+// `mapping`   { [uuid]: {color, char, isHost} } — UUIDs rendered as "uuid (色 苗字)".
+// `joinCount` { [uuid]: number }                 — total joins observed so far,
+//                                                  appended as "(N回目)" on 入室 lines.
+export function buildText(board, decision, prev, mapping, joinCount) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
@@ -254,8 +255,12 @@ export function buildText(board, decision, prev, mapping) {
   }
 
   const r = (u) => renderUuidWithIcon(u, mapping || {});
+  const visit = (u) => {
+    const n = (joinCount && joinCount[u]) || 0;
+    return n > 0 ? ` (${n}回目)` : '';
+  };
   const lines = [header];
-  for (const u of joined) lines.push(`+ 入室: ${r(u)}`);
+  for (const u of joined) lines.push(`+ 入室: ${r(u)}${visit(u)}`);
   for (const u of left) lines.push(`- 退室: ${r(u)}`);
   if (curIds.length > 0) {
     lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u)}`).join('\n')}`);
@@ -343,8 +348,14 @@ export async function handleCron(env) {
     // (Mappings are kept across leaves — same person often comes back with the
     // same UUID, and KV storage is essentially free at this scale.)
 
+    // Track join counts per UUID. Increment for each newly-appearing UUID this tick.
+    const joinCount = { ...(prev?.joinCount || {}) };
+    for (const u of justJoined) {
+      joinCount[u] = (joinCount[u] || 0) + 1;
+    }
+
     const decision = decideTransition(prev, board);
-    const text = buildText({ ...board, title: titleForDisplay }, decision, prev, mapping);
+    const text = buildText({ ...board, title: titleForDisplay }, decision, prev, mapping, joinCount);
     if (text) {
       const ok = await postWebhook(env, text, decision?.kind || 'change');
       if (ok) notified++;
@@ -359,6 +370,7 @@ export async function handleCron(env) {
       callNum: users.length,
       callLimit: Number(board.callLimit) || 0,
       uuidToIcon: mapping,
+      joinCount,
       lastMessageNum,
       lastSeenAt: new Date().toISOString(),
     };
