@@ -308,81 +308,127 @@ async function postWebhook(env, text, kind) {
   return res.ok;
 }
 
-export async function handleCron(env) {
-  const t0 = Date.now();
-  const { matched, pages, total } = await findMatched(env);
-  let notified = 0;
+// JST calendar date (YYYY-MM-DD) used for daily joinCount reset.
+export function jstDateString(now = new Date()) {
+  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  return jst.toISOString().slice(0, 10);
+}
 
-  for (const board of matched) {
-    const stateKey = `room:${board._id}`;
-    const prevRaw = await env.STATE.get(stateKey);
-    const prev = prevRaw ? JSON.parse(prevRaw) : null;
-    const titleForDisplay = board.title || prev?.title || '(タイトル不明)';
+// Process a single sample: detect transition vs the in-memory state, send a
+// notification if there is a change, and return the new in-memory state.
+// Does NOT touch KV — caller persists once at end of cron tick.
+async function processSample(env, board, state) {
+  const titleForDisplay = board.title || state?.title || '(タイトル不明)';
+  const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
+  const prevIds = Array.isArray(state?.callUserIds) ? state.callUserIds : [];
+  const prevSet = new Set(prevIds);
+  const justJoined = curIds.filter((u) => !prevSet.has(u));
 
-    const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
-    const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
-    const prevSet = new Set(prevIds);
-    const justJoined = curIds.filter((u) => !prevSet.has(u));
-
-    // UUID → chat-icon mapping is **manual only by default**. Chat timing is
-    // unreliable (someone may post 30 min after joining, mis-attributing the
-    // join), so we don't want the worker silently writing potentially-wrong
-    // bindings. Set AUTO_ATTRIBUTE_ICONS=1 to opt in to the heuristic.
-    let mapping = prev?.uuidToIcon || {};
-    let lastMessageNum = Number.isFinite(prev?.lastMessageNum) ? prev.lastMessageNum : 0;
-    let attribCount = 0;
-    if (env.AUTO_ATTRIBUTE_ICONS === '1' && justJoined.length > 0) {
-      try {
-        const messages = await fetchChatMessages(board._id);
-        if (messages) {
-          messages.sort((a, b) => Number(a.num) - Number(b.num));
-          const r = attemptAttribution(prev, justJoined, messages);
-          attribCount = Object.keys(r.mapping).length - Object.keys(mapping).length;
-          mapping = r.mapping;
-          lastMessageNum = r.lastMessageNum;
-        }
-      } catch (e) {
-        console.warn(`fetchChatMessages failed: ${e.message}`);
+  // Optional auto icon attribution (off by default)
+  let mapping = state?.uuidToIcon || {};
+  let lastMessageNum = Number.isFinite(state?.lastMessageNum) ? state.lastMessageNum : 0;
+  let attribCount = 0;
+  if (env.AUTO_ATTRIBUTE_ICONS === '1' && justJoined.length > 0) {
+    try {
+      const messages = await fetchChatMessages(board._id);
+      if (messages) {
+        messages.sort((a, b) => Number(a.num) - Number(b.num));
+        const r = attemptAttribution(state, justJoined, messages);
+        attribCount = Object.keys(r.mapping).length - Object.keys(mapping).length;
+        mapping = r.mapping;
+        lastMessageNum = r.lastMessageNum;
       }
+    } catch (e) {
+      console.warn(`fetchChatMessages failed: ${e.message}`);
     }
-    // (Mappings are kept across leaves — same person often comes back with the
-    // same UUID, and KV storage is essentially free at this scale.)
+  }
 
-    // Track join counts per UUID. Increment for each newly-appearing UUID this tick.
-    const joinCount = { ...(prev?.joinCount || {}) };
-    for (const u of justJoined) {
-      joinCount[u] = (joinCount[u] || 0) + 1;
+  // Distinct-days count: each UUID counts +1 for each calendar day (JST) it
+  // appeared. Multiple re-entries within the same day stay at the same count.
+  // So "(3回目)" means "3 distinct days seen", not "3 entries".
+  const today = jstDateString();
+  const dayCount = { ...(state?.dayCount || {}) };
+  const lastSeenDate = { ...(state?.lastSeenDate || {}) };
+  for (const u of justJoined) {
+    if (lastSeenDate[u] !== today) {
+      dayCount[u] = (dayCount[u] || 0) + 1;
+      lastSeenDate[u] = today;
     }
+  }
 
-    const decision = decideTransition(prev, board);
-    const text = buildText({ ...board, title: titleForDisplay }, decision, prev, mapping, joinCount);
-    if (text) {
-      const ok = await postWebhook(env, text, decision?.kind || 'change');
-      if (ok) notified++;
-      const tag = decision?.kind || 'change';
-      console.log(`[${tag}] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}` +
-        (attribCount > 0 ? `  +icon-binding=${attribCount}` : ''));
-    }
-    const users = curIds;
-    const next = {
-      title: board.title || prev?.title || '',
+  const decision = decideTransition(state, board);
+  const text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount);
+  let notified = 0;
+  if (text) {
+    const ok = await postWebhook(env, text, decision?.kind || 'change');
+    if (ok) notified = 1;
+    const tag = decision?.kind || 'change';
+    console.log(`[${tag}] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}` +
+      (attribCount > 0 ? `  +icon-binding=${attribCount}` : ''));
+  }
+
+  const users = curIds;
+  return {
+    next: {
+      title: board.title || state?.title || '',
       callUserIds: users,
       callNum: users.length,
       callLimit: Number(board.callLimit) || 0,
       uuidToIcon: mapping,
-      joinCount,
+      dayCount,
+      lastSeenDate,
       lastMessageNum,
       lastSeenAt: new Date().toISOString(),
-    };
-    await env.STATE.put(stateKey, JSON.stringify(next));
+    },
+    notified,
+  };
+}
+
+export async function handleCron(env) {
+  const t0 = Date.now();
+  // Multi-sample within a single 1-minute cron tick to reduce latency between
+  // when a join/leave actually happens and when we notify. Stays inside the
+  // free-plan 30s wall-clock budget: 4 samples × ~1s fetch + 3 sleeps × 7s = 25s.
+  const SAMPLES = Number(env.SAMPLES_PER_TICK || 4);
+  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 7000);
+
+  // Load each room's KV state once. We use the room id from env.TARGET_ID for
+  // the ID-watching path; the title-watching path still works but only on the
+  // first sample (we re-find the matched rooms each sample anyway).
+  const stateCache = new Map();   // stateKey -> in-memory state
+  let totalNotified = 0;
+  let lastPagesInfo = '';
+
+  for (let i = 0; i < SAMPLES; i++) {
+    if (i > 0) await sleep(INTERVAL_MS);
+    let pages, total, matched;
+    try {
+      ({ matched, pages, total } = await findMatched(env));
+    } catch (e) {
+      console.warn(`findMatched failed at sample ${i}: ${e.message}`);
+      continue;
+    }
+    lastPagesInfo = `${pages}p/${total}r`;
+    for (const board of matched) {
+      const stateKey = `room:${board._id}`;
+      let state = stateCache.get(stateKey);
+      if (state === undefined) {
+        const raw = await env.STATE.get(stateKey);
+        state = raw ? JSON.parse(raw) : null;
+      }
+      const { next, notified } = await processSample(env, board, state);
+      totalNotified += notified;
+      stateCache.set(stateKey, next);
+    }
   }
 
-  // For matchByTitle, missing rooms (= room ended/disappeared) handling could go here.
-  // For matchById (single room), if not found we just leave state as-is — when the room
-  // re-appears in the list the diff will fire normally.
+  // Persist once at the end (one KV write per room per cron tick)
+  for (const [stateKey, state] of stateCache) {
+    await env.STATE.put(stateKey, JSON.stringify(state));
+  }
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(`scanned ${pages} pages (${total} rooms), matched=${matched.length}, notified=${notified}, elapsed=${elapsed}s`);
+  console.log(`samples=${SAMPLES} ${lastPagesInfo}, rooms=${stateCache.size}, notified=${totalNotified}, elapsed=${elapsed}s`);
 }
 
 export default {

@@ -1,5 +1,5 @@
 // Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
-import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName, inferAllowedMentions } from '../src/index.js';
+import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName, inferAllowedMentions, jstDateString } from '../src/index.js';
 
 const board = (id, title, n, limit) => ({
   _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
@@ -230,7 +230,7 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
   if (ok) pass++; else fail++;
 }
 
-// joinCount rendering
+// dayCount rendering ("(N回目)" = N distinct days seen)
 {
   const m = { [u(1)]: { color: '#0fb9b1', char: '渡辺', isHost: false } };
   const t = buildText(makeBoard([u(1)], 5),
@@ -291,6 +291,23 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
     console.log(`${ok ? '✅' : '❌'} mention: ${label}`);
     if (ok) pass++; else fail++;
   }
+}
+
+// ---------- jstDateString ----------
+{
+  // Around UTC midnight, JST should already be 9 AM next day
+  const utcMidnight = new Date('2026-05-02T00:00:00Z');
+  const jstDate = jstDateString(utcMidnight);
+  const ok1 = jstDate === '2026-05-02';
+  console.log(`${ok1 ? '✅' : '❌'} jstDateString: 00:00 UTC -> 09:00 JST same day -> ${jstDate}`);
+  if (ok1) pass++; else fail++;
+
+  // 15:00 UTC = 00:00 JST next day -> date should be next day
+  const utcAfternoon = new Date('2026-05-01T15:00:00Z');
+  const jstDate2 = jstDateString(utcAfternoon);
+  const ok2 = jstDate2 === '2026-05-02';
+  console.log(`${ok2 ? '✅' : '❌'} jstDateString: 15:00 UTC -> 00:00 JST next day -> ${jstDate2}`);
+  if (ok2) pass++; else fail++;
 }
 
 console.log(`\n${pass}/${pass+fail} passed`);
