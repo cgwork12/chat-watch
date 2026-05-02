@@ -381,9 +381,28 @@ export async function handleCron(env) {
   let totalNotified = 0;
   let lastPagesInfo = '';
 
-  // Bindings (uuid -> chat icon) live in a separate KV key that the cron
-  // **never writes to**, so manual binds survive KV eventual-consistency races.
-  const bindingCache = new Map();   // bindingKey -> mapping object
+  // Bindings: one KV key per UUID at `room:<id>:binding:<uuid>`. Read once
+  // per cron tick (not per sample) and cached in memory for the rest of the
+  // tick. Per-key storage avoids the KV eventual-consistency races we hit
+  // with a single aggregated bindings key.
+  const bindingCache = new Map();   // boardId -> { uuid -> {color,char,isHost} }
+  async function loadBindings(boardId) {
+    if (bindingCache.has(boardId)) return bindingCache.get(boardId);
+    const prefix = `room:${boardId}:binding:`;
+    const out = {};
+    let cursor;
+    do {
+      const list = await env.STATE.list({ prefix, cursor });
+      for (const k of list.keys) {
+        const uuid = k.name.slice(prefix.length);
+        const v = await env.STATE.get(k.name);
+        if (v) try { out[uuid] = JSON.parse(v); } catch {}
+      }
+      cursor = list.list_complete ? undefined : list.cursor;
+    } while (cursor);
+    bindingCache.set(boardId, out);
+    return out;
+  }
 
   for (let i = 0; i < SAMPLES; i++) {
     if (i > 0) await sleep(INTERVAL_MS);
@@ -397,18 +416,12 @@ export async function handleCron(env) {
     lastPagesInfo = `${pages}p/${total}r`;
     for (const board of matched) {
       const stateKey = `room:${board._id}`;
-      const bindingKey = `room:${board._id}:bindings`;
       let state = stateCache.get(stateKey);
       if (state === undefined) {
         const raw = await env.STATE.get(stateKey);
         state = raw ? JSON.parse(raw) : null;
       }
-      let mapping = bindingCache.get(bindingKey);
-      if (mapping === undefined) {
-        const raw = await env.STATE.get(bindingKey);
-        mapping = raw ? JSON.parse(raw) : {};
-        bindingCache.set(bindingKey, mapping);
-      }
+      const mapping = await loadBindings(board._id);
       const { next, notified } = await processSample(env, board, state, mapping);
       totalNotified += notified;
       stateCache.set(stateKey, next);

@@ -86,8 +86,7 @@ console.log('reading KV state...');
 const stateRaw = kvGet(`room:${targetId}`);
 if (!stateRaw) { console.error('no KV state found'); process.exit(1); }
 const state = JSON.parse(stateRaw);
-const bindingsRaw = kvGet(`room:${targetId}:bindings`);
-const mapping = bindingsRaw ? JSON.parse(bindingsRaw) : {};
+const mapping = loadBindings();
 console.log(`room: ${state.title}  members=${state.callNum}/${state.callLimit}  bindings=${Object.keys(mapping).length}`);
 
 console.log('fetching chat messages...');
@@ -160,24 +159,47 @@ console.log('\n--- report ---');
 console.log(report);
 console.log('---');
 
-// persist mapping if requested (writes to bindings key only — never touches state)
+// persist mapping if requested. Per-binding writes are atomic and
+// independent so we can apply only the newly-bound entry.
 if (apply) {
-  if (kvPut(`room:${targetId}:bindings`, JSON.stringify(mapping))) {
-    console.log('💾 bindings updated.');
+  if (bound) {
+    if (setBinding(bound.uid, { color: bound.icon.color, char: bound.icon.char, isHost: !!bound.icon.isHost })) {
+      console.log('💾 binding written.');
+    }
+  } else {
+    console.log('nothing to apply (no unambiguous attribution this run)');
   }
 } else {
   console.log('(dry run; pass --apply to persist)');
 }
 
-// Bindings live in their own KV key so cron can never clobber them.
-function bindingsKey() { return `room:${targetId}:bindings`; }
-function loadBindings() {
-  const raw = kvGet(bindingsKey());
-  if (!raw) return {};
-  try { return JSON.parse(raw); } catch { return {}; }
+// Bindings live in one KV key per UUID: `room:<id>:binding:<uuid>`.
+// Atomic per-binding writes — no read-modify-write, no consistency races.
+function bindingPrefix() { return `room:${targetId}:binding:`; }
+function bindingKeyFor(uuid) { return `${bindingPrefix()}${uuid}`; }
+
+function listAllBindings() {
+  const r = wrangler(['kv', 'key', 'list', '--binding=STATE', '--preview=false', `--prefix=${bindingPrefix()}`]);
+  if (r.code !== 0) return [];
+  let arr;
+  try { arr = JSON.parse(r.stdout); } catch { return []; }
+  return Array.isArray(arr) ? arr.map((e) => e.name) : [];
 }
-function saveBindings(map) {
-  return kvPut(bindingsKey(), JSON.stringify(map));
+function loadBindings() {
+  const out = {};
+  for (const k of listAllBindings()) {
+    const uuid = k.slice(bindingPrefix().length);
+    const v = kvGet(k);
+    if (v) try { out[uuid] = JSON.parse(v); } catch {}
+  }
+  return out;
+}
+function setBinding(uuid, icon) {
+  return kvPut(bindingKeyFor(uuid), JSON.stringify(icon));
+}
+function deleteBinding(uuid) {
+  const r = wrangler(['kv', 'key', 'delete', '--binding=STATE', '--preview=false', bindingKeyFor(uuid)]);
+  return r.code === 0;
 }
 function loadCallUserIds() {
   const raw = kvGet(`room:${targetId}`);
@@ -204,8 +226,7 @@ async function manualUnbind() {
   const matches = Object.keys(mapping).filter((u) => u === uuidArg || u.startsWith(uuidArg));
   if (matches.length === 0) { console.error(`no mapping for ${uuidArg}`); process.exit(1); }
   if (matches.length > 1) { console.error(`ambiguous prefix ${uuidArg}: ${matches.join(', ')}`); process.exit(1); }
-  delete mapping[matches[0]];
-  if (saveBindings(mapping)) console.log(`✅ unbound ${matches[0]}`);
+  if (deleteBinding(matches[0])) console.log(`✅ unbound ${matches[0]}`);
 }
 
 async function listMapping() {
@@ -237,9 +258,7 @@ async function manualBind() {
     if (cand.length > 1) { console.error(`ambiguous prefix ${uuidArg}: ${cand.join(', ')}`); process.exit(1); }
     full = cand[0];
   }
-  const mapping = loadBindings();
-  mapping[full] = { color, char, isHost };
-  if (saveBindings(mapping)) {
+  if (setBinding(full, { color, char, isHost })) {
     console.log(`✅ bound ${full} → ${colorName(color)} ${char}${isHost ? ' 👑' : ''}`);
   }
 }
