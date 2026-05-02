@@ -86,8 +86,9 @@ console.log('reading KV state...');
 const stateRaw = kvGet(`room:${targetId}`);
 if (!stateRaw) { console.error('no KV state found'); process.exit(1); }
 const state = JSON.parse(stateRaw);
-const mapping = { ...(state.uuidToIcon || {}) };
-console.log(`room: ${state.title}  members=${state.callNum}/${state.callLimit}`);
+const bindingsRaw = kvGet(`room:${targetId}:bindings`);
+const mapping = bindingsRaw ? JSON.parse(bindingsRaw) : {};
+console.log(`room: ${state.title}  members=${state.callNum}/${state.callLimit}  bindings=${Object.keys(mapping).length}`);
 
 console.log('fetching chat messages...');
 const r = await fetch(`https://rc.pnyo.jp/api/web/board/messages?boardId=${targetId}`, {
@@ -159,43 +160,46 @@ console.log('\n--- report ---');
 console.log(report);
 console.log('---');
 
-// persist mapping if requested
+// persist mapping if requested (writes to bindings key only — never touches state)
 if (apply) {
-  // also bump lastMessageNum to current latest
-  const nextLastMessageNum = Math.max(state.lastMessageNum || 0, ...messages.map((m) => Number(m.num)));
-  const next = { ...state, uuidToIcon: mapping, lastMessageNum: nextLastMessageNum };
-  if (kvPut(`room:${targetId}`, JSON.stringify(next))) {
-    console.log('💾 KV updated.');
+  if (kvPut(`room:${targetId}:bindings`, JSON.stringify(mapping))) {
+    console.log('💾 bindings updated.');
   }
 } else {
   console.log('(dry run; pass --apply to persist)');
 }
 
+// Bindings live in their own KV key so cron can never clobber them.
+function bindingsKey() { return `room:${targetId}:bindings`; }
+function loadBindings() {
+  const raw = kvGet(bindingsKey());
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+function saveBindings(map) {
+  return kvPut(bindingsKey(), JSON.stringify(map));
+}
+function loadCallUserIds() {
+  const raw = kvGet(`room:${targetId}`);
+  if (!raw) return [];
+  try { return JSON.parse(raw).callUserIds || []; } catch { return []; }
+}
+
 async function manualUnbind() {
   const uuidArg = process.argv[3];
   if (!uuidArg) { console.error('Usage: node scripts/backfill.mjs unbind <uuid_or_prefix>'); process.exit(2); }
-  const stateRaw = kvGet(`room:${targetId}`);
-  if (!stateRaw) { console.error('no KV state'); process.exit(1); }
-  const state = JSON.parse(stateRaw);
-  const mapping = { ...(state.uuidToIcon || {}) };
-  // Resolve prefix → full UUID
+  const mapping = loadBindings();
   const matches = Object.keys(mapping).filter((u) => u === uuidArg || u.startsWith(uuidArg));
   if (matches.length === 0) { console.error(`no mapping for ${uuidArg}`); process.exit(1); }
   if (matches.length > 1) { console.error(`ambiguous prefix ${uuidArg}: ${matches.join(', ')}`); process.exit(1); }
   delete mapping[matches[0]];
-  const next = { ...state, uuidToIcon: mapping };
-  if (kvPut(`room:${targetId}`, JSON.stringify(next))) {
-    console.log(`✅ unbound ${matches[0]}`);
-  }
+  if (saveBindings(mapping)) console.log(`✅ unbound ${matches[0]}`);
 }
 
 async function listMapping() {
-  const stateRaw = kvGet(`room:${targetId}`);
-  if (!stateRaw) { console.error('no KV state'); process.exit(1); }
-  const state = JSON.parse(stateRaw);
-  const mapping = state.uuidToIcon || {};
-  const inCall = new Set(state.callUserIds || []);
-  console.log(`mapping (${Object.keys(mapping).length} entries):`);
+  const mapping = loadBindings();
+  const inCall = new Set(loadCallUserIds());
+  console.log(`bindings (${Object.keys(mapping).length} entries):`);
   for (const [uuid, ic] of Object.entries(mapping)) {
     const here = inCall.has(uuid) ? ' [現在通話中]' : '';
     console.log(`  ${uuid}  →  ${colorName(ic.color)} ${ic.char}${ic.isHost ? ' 👑' : ''}${here}`);
@@ -212,19 +216,16 @@ async function manualBind() {
     console.error('Example: node scripts/backfill.mjs bind 5c9f6f48 "#d1d8e0" "主" --host');
     process.exit(2);
   }
-  const stateRaw = kvGet(`room:${targetId}`);
-  if (!stateRaw) { console.error('no KV state'); process.exit(1); }
-  const state = JSON.parse(stateRaw);
-  // expand prefix to full UUID against current callUserIds
   let full = uuidArg;
   if (!uuidArg.includes('-')) {
-    const cand = (state.callUserIds || []).filter((u) => u.startsWith(uuidArg));
+    const cand = loadCallUserIds().filter((u) => u.startsWith(uuidArg));
     if (cand.length === 0) { console.error(`no UUID starting with ${uuidArg} in current call`); process.exit(1); }
     if (cand.length > 1) { console.error(`ambiguous prefix ${uuidArg}: ${cand.join(', ')}`); process.exit(1); }
     full = cand[0];
   }
-  const next = { ...state, uuidToIcon: { ...(state.uuidToIcon || {}), [full]: { color, char, isHost } } };
-  if (kvPut(`room:${targetId}`, JSON.stringify(next))) {
+  const mapping = loadBindings();
+  mapping[full] = { color, char, isHost };
+  if (saveBindings(mapping)) {
     console.log(`✅ bound ${full} → ${colorName(color)} ${char}${isHost ? ' 👑' : ''}`);
   }
 }

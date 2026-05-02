@@ -317,31 +317,16 @@ export function jstDateString(now = new Date()) {
 // Process a single sample: detect transition vs the in-memory state, send a
 // notification if there is a change, and return the new in-memory state.
 // Does NOT touch KV — caller persists once at end of cron tick.
-async function processSample(env, board, state) {
+//
+// `mapping` is read separately (from the bindings KV key, never written by
+// cron) so that manual binds survive eventual-consistency races with the
+// cron-managed state key.
+async function processSample(env, board, state, mapping) {
   const titleForDisplay = board.title || state?.title || '(タイトル不明)';
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(state?.callUserIds) ? state.callUserIds : [];
   const prevSet = new Set(prevIds);
   const justJoined = curIds.filter((u) => !prevSet.has(u));
-
-  // Optional auto icon attribution (off by default)
-  let mapping = state?.uuidToIcon || {};
-  let lastMessageNum = Number.isFinite(state?.lastMessageNum) ? state.lastMessageNum : 0;
-  let attribCount = 0;
-  if (env.AUTO_ATTRIBUTE_ICONS === '1' && justJoined.length > 0) {
-    try {
-      const messages = await fetchChatMessages(board._id);
-      if (messages) {
-        messages.sort((a, b) => Number(a.num) - Number(b.num));
-        const r = attemptAttribution(state, justJoined, messages);
-        attribCount = Object.keys(r.mapping).length - Object.keys(mapping).length;
-        mapping = r.mapping;
-        lastMessageNum = r.lastMessageNum;
-      }
-    } catch (e) {
-      console.warn(`fetchChatMessages failed: ${e.message}`);
-    }
-  }
 
   // Distinct-days count: each UUID counts +1 for each calendar day (JST) it
   // appeared. Multiple re-entries within the same day stay at the same count.
@@ -363,8 +348,7 @@ async function processSample(env, board, state) {
     const ok = await postWebhook(env, text, decision?.kind || 'change');
     if (ok) notified = 1;
     const tag = decision?.kind || 'change';
-    console.log(`[${tag}] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}` +
-      (attribCount > 0 ? `  +icon-binding=${attribCount}` : ''));
+    console.log(`[${tag}] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}`);
   }
 
   const users = curIds;
@@ -374,10 +358,8 @@ async function processSample(env, board, state) {
       callUserIds: users,
       callNum: users.length,
       callLimit: Number(board.callLimit) || 0,
-      uuidToIcon: mapping,
       dayCount,
       lastSeenDate,
-      lastMessageNum,
       lastSeenAt: new Date().toISOString(),
     },
     notified,
@@ -399,6 +381,10 @@ export async function handleCron(env) {
   let totalNotified = 0;
   let lastPagesInfo = '';
 
+  // Bindings (uuid -> chat icon) live in a separate KV key that the cron
+  // **never writes to**, so manual binds survive KV eventual-consistency races.
+  const bindingCache = new Map();   // bindingKey -> mapping object
+
   for (let i = 0; i < SAMPLES; i++) {
     if (i > 0) await sleep(INTERVAL_MS);
     let pages, total, matched;
@@ -411,12 +397,19 @@ export async function handleCron(env) {
     lastPagesInfo = `${pages}p/${total}r`;
     for (const board of matched) {
       const stateKey = `room:${board._id}`;
+      const bindingKey = `room:${board._id}:bindings`;
       let state = stateCache.get(stateKey);
       if (state === undefined) {
         const raw = await env.STATE.get(stateKey);
         state = raw ? JSON.parse(raw) : null;
       }
-      const { next, notified } = await processSample(env, board, state);
+      let mapping = bindingCache.get(bindingKey);
+      if (mapping === undefined) {
+        const raw = await env.STATE.get(bindingKey);
+        mapping = raw ? JSON.parse(raw) : {};
+        bindingCache.set(bindingKey, mapping);
+      }
+      const { next, notified } = await processSample(env, board, state, mapping);
       totalNotified += notified;
       stateCache.set(stateKey, next);
     }
