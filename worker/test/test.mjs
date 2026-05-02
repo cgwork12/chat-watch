@@ -1,5 +1,5 @@
 // Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
-import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName } from '../src/index.js';
+import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName, inferAllowedMentions } from '../src/index.js';
 
 const board = (id, title, n, limit) => ({
   _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
@@ -228,6 +228,28 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
   console.log(`${ok ? '✅' : '❌'} buildText with mapping renders icon next to UUID`);
   if (!ok) { console.log('   ', t.replace(/\n/g, '\n    ')); }
   if (ok) pass++; else fail++;
+}
+
+// ---------- inferAllowedMentions ----------
+{
+  const a1 = inferAllowedMentions('@everyone');
+  const a2 = inferAllowedMentions('@here');
+  const a3 = inferAllowedMentions('<@123456789012345>');
+  const a4 = inferAllowedMentions('<@!123456789012345>');
+  const a5 = inferAllowedMentions('<@&987654321>');
+  const a6 = inferAllowedMentions('plain text');
+  const a7 = inferAllowedMentions('');
+  const ok1 = a1?.parse?.includes('everyone');
+  const ok2 = a2?.parse?.includes('everyone');
+  const ok3 = JSON.stringify(a3) === JSON.stringify({ users: ['123456789012345'] });
+  const ok4 = JSON.stringify(a4) === JSON.stringify({ users: ['123456789012345'] });
+  const ok5 = JSON.stringify(a5) === JSON.stringify({ roles: ['987654321'] });
+  const ok6 = a6 === null;
+  const ok7 = a7 === null;
+  for (const [label, ok] of [['@everyone', ok1], ['@here', ok2], ['user mention', ok3], ['user! mention', ok4], ['role mention', ok5], ['plain text', ok6], ['empty', ok7]]) {
+    console.log(`${ok ? '✅' : '❌'} mention: ${label}`);
+    if (ok) pass++; else fail++;
+  }
 }
 
 console.log(`\n${pass}/${pass+fail} passed`);

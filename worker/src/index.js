@@ -264,11 +264,33 @@ export function buildText(board, decision, prev, mapping) {
   return lines.join('\n');
 }
 
-async function postWebhook(env, text) {
+// Discord mentions need both an explicit allowed_mentions object AND the
+// inline syntax (<@id>, <@&roleId>, @everyone, @here). Webhook posts default
+// to "no mentions allowed" for safety.
+export function inferAllowedMentions(mention) {
+  if (!mention) return null;
+  if (/@everyone|@here/.test(mention)) return { parse: ['everyone'] };
+  const m1 = mention.match(/<@!?(\d{5,})>/);
+  if (m1) return { users: [m1[1]] };
+  const m2 = mention.match(/<@&(\d{5,})>/);
+  if (m2) return { roles: [m2[1]] };
+  return null;
+}
+
+const IMPORTANT_KINDS = new Set(['started', 'becameFull', 'opened']);
+
+async function postWebhook(env, text, kind) {
   const url = env.WEBHOOK_URL;
   if (!url) throw new Error('WEBHOOK_URL is required');
   const type = (env.WEBHOOK_TYPE || 'discord').toLowerCase();
-  const body = type === 'slack' ? { text } : { content: text };
+  const mention = env.IMPORTANT_MENTION || '';
+  const wantsMention = mention && IMPORTANT_KINDS.has(kind);
+  const finalText = wantsMention ? `${mention}\n${text}` : text;
+  const body = type === 'slack' ? { text: finalText } : { content: finalText };
+  if (type === 'discord' && wantsMention) {
+    const allow = inferAllowedMentions(mention);
+    if (allow) body.allowed_mentions = allow;
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -323,7 +345,7 @@ export async function handleCron(env) {
     const decision = decideTransition(prev, board);
     const text = buildText({ ...board, title: titleForDisplay }, decision, prev, mapping);
     if (text) {
-      const ok = await postWebhook(env, text);
+      const ok = await postWebhook(env, text, decision?.kind || 'change');
       if (ok) notified++;
       const tag = decision?.kind || 'change';
       console.log(`[${tag}] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}` +

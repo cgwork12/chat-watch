@@ -25,6 +25,9 @@ preview_id = "32b15cf3d3a24666a248cc102ea875bc"
 MAX_PAGES = "10"
 WEBHOOK_TYPE = "discord"
 TARGET_ID = "699244bce7401621a87adf10"
+# Mention prepended only for the 3 high-priority kinds (started/becameFull/opened).
+# Set to one of: "@everyone", "@here", "<@USER_ID>", "<@&ROLE_ID>", or "" to disable.
+IMPORTANT_MENTION = "@everyone"
 
 # Worker secrets (do NOT put values here):
 #   wrangler secret put WEBHOOK_URL    # Discord webhook URL
