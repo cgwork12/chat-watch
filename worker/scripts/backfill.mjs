@@ -184,6 +184,18 @@ function loadCallUserIds() {
   if (!raw) return [];
   try { return JSON.parse(raw).callUserIds || []; } catch { return []; }
 }
+// All UUIDs we've ever observed (current + historical, via dayCount keys).
+function loadKnownUuids() {
+  const raw = kvGet(`room:${targetId}`);
+  if (!raw) return [];
+  try {
+    const s = JSON.parse(raw);
+    const set = new Set(s.callUserIds || []);
+    for (const k of Object.keys(s.dayCount || {})) set.add(k);
+    for (const k of Object.keys(s.lastSeenDate || {})) set.add(k);
+    return [...set];
+  } catch { return []; }
+}
 
 async function manualUnbind() {
   const uuidArg = process.argv[3];
@@ -218,8 +230,10 @@ async function manualBind() {
   }
   let full = uuidArg;
   if (!uuidArg.includes('-')) {
-    const cand = loadCallUserIds().filter((u) => u.startsWith(uuidArg));
-    if (cand.length === 0) { console.error(`no UUID starting with ${uuidArg} in current call`); process.exit(1); }
+    // Search current call AND any UUID we've observed before (dayCount keys)
+    const known = loadKnownUuids();
+    const cand = known.filter((u) => u.startsWith(uuidArg));
+    if (cand.length === 0) { console.error(`no observed UUID starting with ${uuidArg}`); process.exit(1); }
     if (cand.length > 1) { console.error(`ambiguous prefix ${uuidArg}: ${cand.join(', ')}`); process.exit(1); }
     full = cand[0];
   }
