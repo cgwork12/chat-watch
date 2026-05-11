@@ -124,7 +124,7 @@ export function colorName(hex) {
   const m = {
     '#0fb9b1': 'ティール',
     '#26de81': '緑',
-    '#2bcbba': 'ミント',
+    '#2bcbba': 'エメグリ',
     '#2d98da': '青',
     '#3867d6': '濃青',
     '#45aaf2': '水色',

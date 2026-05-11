@@ -34,7 +34,11 @@ if (!targetId) {
 }
 
 function wrangler(args) {
-  const r = spawnSync('npx', ['wrangler', ...args], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8' });
+  // Always run wrangler with the same Node that's running this script, so it
+  // can't pick up an older Node from PATH and fail with a version error.
+  const workerDir = new URL('..', import.meta.url).pathname;
+  const wranglerBin = `${workerDir}node_modules/wrangler/bin/wrangler.js`;
+  const r = spawnSync(process.execPath, [wranglerBin, ...args], { cwd: workerDir, encoding: 'utf8' });
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
@@ -73,7 +77,7 @@ if (sub === 'list') {
 function iconKey(icon) { return `${icon.color}|${icon.char}|${icon.isHost ? 1 : 0}`; }
 function colorName(hex) {
   const m = {
-    '#0fb9b1': 'ティール','#26de81': '緑','#2bcbba': 'ミント','#2d98da': '青','#3867d6': '濃青',
+    '#0fb9b1': 'ティール','#26de81': '緑','#2bcbba': 'エメグリ','#2d98da': '青','#3867d6': '濃青',
     '#45aaf2': '水色','#4b6584': '灰青','#778ca3': 'グレー','#a55eea': '紫','#d1d8e0': 'グレー',
     '#eb3b5a': '紅','#f7b731': '黄','#fa8231': '橙','#fc5c65': '赤','#fd9644': '橙',
   };
