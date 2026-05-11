@@ -134,9 +134,9 @@ export function colorName(hex) {
     '#d1d8e0': 'グレー',
     '#eb3b5a': '紅',
     '#f7b731': '黄',
-    '#fa8231': '橙',
+    '#fa8231': 'オレンジ',
     '#fc5c65': '赤',
-    '#fd9644': '橙',
+    '#fd9644': 'オレンジ',
   };
   return m[hex.toLowerCase()] || hex;
 }
