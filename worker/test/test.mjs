@@ -1,5 +1,5 @@
 // Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
-import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName, inferAllowedMentions, jstDateString, jstTimeString } from '../src/index.js';
+import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName, inferAllowedMentions, jstDateString, jstTimeString, formatDuration } from '../src/index.js';
 
 const board = (id, title, n, limit) => ({
   _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
@@ -309,6 +309,58 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
   }
 }
 
+// ---------- formatDuration ----------
+{
+  const cases = [
+    [0, '0秒'],
+    [15_000, '15秒'],
+    [59_999, '59秒'],
+    [60_000, '1分'],
+    [600_000, '10分'],
+    [3_600_000, '1時間'],
+    [3_661_000, '1時間1分'],
+    [7_320_000, '2時間2分'],
+  ];
+  for (const [ms, want] of cases) {
+    const got = formatDuration(ms);
+    const ok = got === want;
+    console.log(`${ok ? '✅' : '❌'} formatDuration(${ms}) -> ${got} (want ${want})`);
+    if (ok) pass++; else fail++;
+  }
+}
+
+// buildText: 滞在 / 総 のセクションが入っているか
+{
+  // started: prev empty, cur has u(1). The line should show "(0秒 / 総 2時間2分)".
+  const durations = { [u(1)]: { sessionMs: 0, totalMs: 7_320_000 } };
+  const t = buildText(makeBoard([u(1)], 5),
+    { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
+    makePrev([], 5),
+    {},
+    { [u(1)]: 3 },
+    durations,
+    new Date('2026-05-13T06:32:15Z'));
+  const ok = /\+ 入室:.*\(3回目\) \(滞在 0秒 \/ 総 2時間2分\)/.test(t);
+  console.log(`${ok ? '✅' : '❌'} buildText: 入室 line shows session + total`);
+  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
+  if (ok) pass++; else fail++;
+}
+{
+  // ended: prev has u(1), cur empty. The 退室 line should carry the final session length.
+  const durations = { [u(1)]: { sessionMs: 90_000, totalMs: 7_320_000 } };
+  const t = buildText(makeBoard([], 5),
+    { kind: 'ended', prevNum: 1, curNum: 0, limit: 5 },
+    makePrev([u(1)], 5),
+    {},
+    { [u(1)]: 3 },
+    durations,
+    new Date('2026-05-13T06:32:15Z'));
+  const ok = /- 退室:.*\(滞在 1分 \/ 総 2時間2分\)/.test(t);
+  console.log(`${ok ? '✅' : '❌'} buildText: 退室 line shows final session + total`);
+  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
+  if (ok) pass++; else fail++;
+}
+
 // ---------- jstTimeString ----------
 {
   // 06:32:15 UTC -> 15:32:15 JST
@@ -324,6 +376,7 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
     { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
     makePrev([], 5),
     {}, { [u(1)]: 1 },
+    {},  // durations
     new Date('2026-05-13T06:32:15Z'));
   const ok = /🕐 15:32:15$/.test(t);
   console.log(`${ok ? '✅' : '❌'} buildText: ends with 🕐 HH:MM:SS in JST`);

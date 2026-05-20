@@ -230,7 +230,7 @@ export function decideTransition(prev, board) {
 // `mapping`   { [uuid]: {color, char, isHost} } — UUIDs rendered as "uuid (色 苗字)".
 // `joinCount` { [uuid]: number }                 — total joins observed so far,
 //                                                  appended as "(N回目)" on 入室 lines.
-export function buildText(board, decision, prev, mapping, joinCount, now = new Date()) {
+export function buildText(board, decision, prev, mapping, joinCount, durations, now = new Date()) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
@@ -259,11 +259,16 @@ export function buildText(board, decision, prev, mapping, joinCount, now = new D
     const n = (joinCount && joinCount[u]) || 0;
     return n > 0 ? ` (${n}回目)` : '';
   };
+  const stay = (u) => {
+    const d = durations && durations[u];
+    if (!d) return '';
+    return ` (滞在 ${formatDuration(d.sessionMs)} / 総 ${formatDuration(d.totalMs)})`;
+  };
   const lines = [header];
-  for (const u of joined) lines.push(`+ 入室: ${r(u)}${visit(u)}`);
-  for (const u of left) lines.push(`- 退室: ${r(u)}`);
+  for (const u of joined) lines.push(`+ 入室: ${r(u)}${visit(u)}${stay(u)}`);
+  for (const u of left) lines.push(`- 退室: ${r(u)}${stay(u)}`);
   if (curIds.length > 0) {
-    lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u)}${visit(u)}`).join('\n')}`);
+    lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u)}${visit(u)}${stay(u)}`).join('\n')}`);
   }
   lines.push(url);
   lines.push(`🕐 ${jstTimeString(now)}`);
@@ -322,6 +327,16 @@ export function jstTimeString(now = new Date()) {
   return jst.toISOString().slice(11, 19);
 }
 
+// Human-readable duration: "12秒" / "5分" / "2時間15分" etc.
+export function formatDuration(ms) {
+  const x = Number(ms) || 0;
+  if (x < 60_000) return `${Math.floor(x / 1000)}秒`;
+  if (x < 3_600_000) return `${Math.floor(x / 60_000)}分`;
+  const h = Math.floor(x / 3_600_000);
+  const m = Math.floor((x % 3_600_000) / 60_000);
+  return m === 0 ? `${h}時間` : `${h}時間${m}分`;
+}
+
 // Process a single sample: detect transition vs the in-memory state, send a
 // notification if there is a change, and return the new in-memory state.
 // Does NOT touch KV — caller persists once at end of cron tick.
@@ -334,7 +349,9 @@ async function processSample(env, board, state, mapping) {
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(state?.callUserIds) ? state.callUserIds : [];
   const prevSet = new Set(prevIds);
+  const curSet = new Set(curIds);
   const justJoined = curIds.filter((u) => !prevSet.has(u));
+  const justLeft = prevIds.filter((u) => !curSet.has(u));
 
   // Distinct-days count: each UUID counts +1 for each calendar day (JST) it
   // appeared. Multiple re-entries within the same day stay at the same count.
@@ -349,8 +366,42 @@ async function processSample(env, board, state, mapping) {
     }
   }
 
+  // Session timing.
+  //   joinedAt[u] = ISO string of when the current (uncompleted) session began
+  //   totalMs[u]  = sum of all completed sessions for u, in ms
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const oldJoinedAt = state?.joinedAt || {};
+  const joinedAt = { ...oldJoinedAt };
+  const totalMs = { ...(state?.totalMs || {}) };
+
+  // Departed this tick: close their session, add to totalMs, drop joinedAt
+  for (const u of justLeft) {
+    const ja = Date.parse(oldJoinedAt[u] || '');
+    if (Number.isFinite(ja)) totalMs[u] = (totalMs[u] || 0) + (nowMs - ja);
+    delete joinedAt[u];
+  }
+  // Newly joined: start a fresh session
+  for (const u of justJoined) joinedAt[u] = nowIso;
+  // First-ever observation of an existing member (e.g. seeded by migration):
+  // give them a joinedAt of "now" so we start counting from here
+  for (const u of curIds) if (!joinedAt[u]) joinedAt[u] = nowIso;
+
+  // Build durations map used by buildText: per-UUID { sessionMs, totalMs }
+  const durations = {};
+  for (const u of curIds) {
+    const ja = Date.parse(oldJoinedAt[u] || '');
+    const session = Number.isFinite(ja) && !justJoined.includes(u) ? (nowMs - ja) : 0;
+    durations[u] = { sessionMs: session, totalMs: (state?.totalMs?.[u] || 0) + session };
+  }
+  for (const u of justLeft) {
+    const ja = Date.parse(oldJoinedAt[u] || '');
+    const session = Number.isFinite(ja) ? (nowMs - ja) : 0;
+    durations[u] = { sessionMs: session, totalMs: totalMs[u] || 0 };  // totalMs already includes this session
+  }
+
   const decision = decideTransition(state, board);
-  const text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount);
+  const text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount, durations);
   let notified = 0;
   if (text) {
     const ok = await postWebhook(env, text, decision?.kind || 'change');
@@ -359,16 +410,17 @@ async function processSample(env, board, state, mapping) {
     console.log(`[${tag}] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}`);
   }
 
-  const users = curIds;
   return {
     next: {
       title: board.title || state?.title || '',
-      callUserIds: users,
-      callNum: users.length,
+      callUserIds: curIds,
+      callNum: curIds.length,
       callLimit: Number(board.callLimit) || 0,
       dayCount,
       lastSeenDate,
-      lastSeenAt: new Date().toISOString(),
+      joinedAt,
+      totalMs,
+      lastSeenAt: nowIso,
     },
     notified,
   };
