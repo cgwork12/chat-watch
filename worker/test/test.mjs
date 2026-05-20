@@ -244,6 +244,22 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
   if (ok) pass++; else fail++;
 }
 
+// dayCount is shown in 全員 list too (not just on 入室 line)
+{
+  const t = buildText(makeBoard([u(1), u(2), u(3)], 5),
+    null,
+    makePrev([u(1), u(2)], 5),  // u(3) just joined, u(1)+u(2) already there
+    {},
+    { [u(1)]: 5, [u(2)]: 2, [u(3)]: 1 });
+  // each 全員 line should carry (N回目)
+  const ok = /  [^\s]+ \(5回目\)/.test(t)
+          && /  [^\s]+ \(2回目\)/.test(t)
+          && /  [^\s]+ \(1回目\)/.test(t);
+  console.log(`${ok ? '✅' : '❌'} buildText: 全員 list also shows "(N回目)" per user`);
+  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
+  if (ok) pass++; else fail++;
+}
+
 {
   // 退室 should NOT show count
   const t = buildText(makeBoard([], 5),

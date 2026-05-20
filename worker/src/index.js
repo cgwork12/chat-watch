@@ -263,7 +263,7 @@ export function buildText(board, decision, prev, mapping, joinCount) {
   for (const u of joined) lines.push(`+ 入室: ${r(u)}${visit(u)}`);
   for (const u of left) lines.push(`- 退室: ${r(u)}`);
   if (curIds.length > 0) {
-    lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u)}`).join('\n')}`);
+    lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u)}${visit(u)}`).join('\n')}`);
   }
   lines.push(url);
   return lines.join('\n');
@@ -370,9 +370,10 @@ export async function handleCron(env) {
   const t0 = Date.now();
   // Multi-sample within a single 1-minute cron tick to reduce latency between
   // when a join/leave actually happens and when we notify. Stays inside the
-  // free-plan 30s wall-clock budget: 4 samples × ~1s fetch + 3 sleeps × 7s = 25s.
-  const SAMPLES = Number(env.SAMPLES_PER_TICK || 4);
-  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 7000);
+  // free-plan 30s wall-clock budget: 6 samples × ~0.8s fetch + 5 sleeps × 4s ≈ 25s.
+  // Denser sampling (every 4s) catches short in-and-out events that 7s missed.
+  const SAMPLES = Number(env.SAMPLES_PER_TICK || 6);
+  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 4000);
 
   // Load each room's KV state once. We use the room id from env.TARGET_ID for
   // the ID-watching path; the title-watching path still works but only on the
