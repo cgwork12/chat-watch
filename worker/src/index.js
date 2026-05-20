@@ -230,7 +230,7 @@ export function decideTransition(prev, board) {
 // `mapping`   { [uuid]: {color, char, isHost} } — UUIDs rendered as "uuid (色 苗字)".
 // `joinCount` { [uuid]: number }                 — total joins observed so far,
 //                                                  appended as "(N回目)" on 入室 lines.
-export function buildText(board, decision, prev, mapping, joinCount) {
+export function buildText(board, decision, prev, mapping, joinCount, now = new Date()) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
@@ -266,6 +266,7 @@ export function buildText(board, decision, prev, mapping, joinCount) {
     lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u)}${visit(u)}`).join('\n')}`);
   }
   lines.push(url);
+  lines.push(`🕐 ${jstTimeString(now)}`);
   return lines.join('\n');
 }
 
@@ -312,6 +313,13 @@ async function postWebhook(env, text, kind) {
 export function jstDateString(now = new Date()) {
   const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
   return jst.toISOString().slice(0, 10);
+}
+
+// JST time HH:MM:SS — embedded in each notification body so the user can
+// tell apart messages that Discord groups together as "X minutes ago".
+export function jstTimeString(now = new Date()) {
+  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  return jst.toISOString().slice(11, 19);
 }
 
 // Process a single sample: detect transition vs the in-memory state, send a

@@ -1,5 +1,5 @@
 // Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
-import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName, inferAllowedMentions, jstDateString } from '../src/index.js';
+import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName, inferAllowedMentions, jstDateString, jstTimeString } from '../src/index.js';
 
 const board = (id, title, n, limit) => ({
   _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
@@ -307,6 +307,28 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
     console.log(`${ok ? '✅' : '❌'} mention: ${label}`);
     if (ok) pass++; else fail++;
   }
+}
+
+// ---------- jstTimeString ----------
+{
+  // 06:32:15 UTC -> 15:32:15 JST
+  const t = jstTimeString(new Date('2026-05-13T06:32:15Z'));
+  const ok = t === '15:32:15';
+  console.log(`${ok ? '✅' : '❌'} jstTimeString: 06:32:15 UTC -> ${t}`);
+  if (ok) pass++; else fail++;
+}
+
+// buildText now appends 🕐 HH:MM:SS at the end
+{
+  const t = buildText(makeBoard([u(1)], 5),
+    { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
+    makePrev([], 5),
+    {}, { [u(1)]: 1 },
+    new Date('2026-05-13T06:32:15Z'));
+  const ok = /🕐 15:32:15$/.test(t);
+  console.log(`${ok ? '✅' : '❌'} buildText: ends with 🕐 HH:MM:SS in JST`);
+  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
+  if (ok) pass++; else fail++;
 }
 
 // ---------- jstDateString ----------
