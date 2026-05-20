@@ -122,6 +122,7 @@ export function iconKey(icon) {
 export function colorName(hex) {
   if (!hex) return '';
   const m = {
+    '#000000': '黒',
     '#0fb9b1': 'ティール',
     '#26de81': '緑',
     '#2bcbba': 'エメグリ',
