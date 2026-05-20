@@ -143,11 +143,11 @@ export function colorName(hex) {
 
 export function renderUuidWithIcon(uuid, mapping) {
   const icon = mapping?.[uuid];
-  if (!icon) return uuid;
+  if (!icon) return `👤 ${uuid}`;
   const name = icon.char || '';
   const color = colorName(icon.color);
   const host = icon.isHost ? ' 👑' : '';
-  return `${uuid} (${color} ${name}${host})`;
+  return `👤 ${uuid} (${color} ${name}${host})`;
 }
 
 // Greedy attribution: if exactly 1 UUID joined this tick AND there is a chat

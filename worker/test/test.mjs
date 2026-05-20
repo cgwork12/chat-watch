@@ -104,37 +104,37 @@ const textCases = [
     () => buildText(makeBoard([u(1)], 5),
       { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
       makePrev([], 5)),
-    [/🟢.*が始まりました/, new RegExp(`\\+ 入室: ${u(1)}`), /👥 全員:/]],
+    [/🟢.*が始まりました/, new RegExp(`\\+ 入室: 👤 ${u(1)}`), /👥 全員:/]],
 
   ['becameFull uses 🔴 wording',
     () => buildText(makeBoard([u(1), u(2), u(3), u(4), u(5)], 5),
       { kind: 'becameFull', prevNum: 4, curNum: 5, limit: 5 },
       makePrev([u(1), u(2), u(3), u(4)], 5)),
-    [/🔴.*が満室になりました/, new RegExp(`\\+ 入室: ${u(5)}`), /4\/5 → 満室\(5\/5\)/]],
+    [/🔴.*が満室になりました/, new RegExp(`\\+ 入室: 👤 ${u(5)}`), /4\/5 → 満室\(5\/5\)/]],
 
   ['opened uses 🟡 wording with leavers',
     () => buildText(makeBoard([u(1), u(2), u(3)], 5),
       { kind: 'opened', prevNum: 5, curNum: 3, limit: 5 },
       makePrev([u(1), u(2), u(3), u(4), u(5)], 5)),
-    [/🟡.*に空きが出ました/, new RegExp(`- 退室: ${u(4)}`), new RegExp(`- 退室: ${u(5)}`)]],
+    [/🟡.*に空きが出ました/, new RegExp(`- 退室: 👤 ${u(4)}`), new RegExp(`- 退室: 👤 ${u(5)}`)]],
 
   ['ended uses ⚫ wording with full UUIDs of leavers',
     () => buildText(makeBoard([], 5),
       { kind: 'ended', prevNum: 2, curNum: 0, limit: 5 },
       makePrev([u(1), u(2)], 5)),
-    [/⚫.*の通話が終了しました/, new RegExp(`- 退室: ${u(1)}`), /2\/5 → 0\/5/]],
+    [/⚫.*の通話が終了しました/, new RegExp(`- 退室: 👤 ${u(1)}`), /2\/5 → 0\/5/]],
 
   ['middle change (1 -> 2) uses 🔵 generic header',
     () => buildText(makeBoard([u(1), u(2)], 5), null, makePrev([u(1)], 5)),
-    [/🔵.*1\/5 → 2\/5/, new RegExp(`\\+ 入室: ${u(2)}`)]],
+    [/🔵.*1\/5 → 2\/5/, new RegExp(`\\+ 入室: 👤 ${u(2)}`)]],
 
   ['middle leave (3 -> 2) uses 🔵',
     () => buildText(makeBoard([u(1), u(2)], 5), null, makePrev([u(1), u(2), u(3)], 5)),
-    [/🔵.*3\/5 → 2\/5/, new RegExp(`- 退室: ${u(3)}`)]],
+    [/🔵.*3\/5 → 2\/5/, new RegExp(`- 退室: 👤 ${u(3)}`)]],
 
   ['simultaneous swap (count unchanged) still notifies',
     () => buildText(makeBoard([v('a', 1), v('c', 2)], 5), null, makePrev([v('a', 1), v('b', 2)], 5)),
-    [/🔵.*2\/5 → 2\/5/, new RegExp(`\\+ 入室: ${v('c', 2)}`), new RegExp(`- 退室: ${v('b', 2)}`)]],
+    [/🔵.*2\/5 → 2\/5/, new RegExp(`\\+ 入室: 👤 ${v('c', 2)}`), new RegExp(`- 退室: 👤 ${v('b', 2)}`)]],
 ];
 
 for (const [label, gen, expected] of textCases) {
@@ -208,7 +208,7 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
   const r3 = renderUuidWithIcon(u(99), m);  // no mapping
   const ok1 = r1.includes(u(1)) && r1.includes('ティール') && r1.includes('渡辺');
   const ok2 = r2.includes(u(2)) && r2.includes('グレー') && r2.includes('主') && r2.includes('👑');
-  const ok3 = r3 === u(99);
+  const ok3 = r3 === `👤 ${u(99)}`;
   console.log(`${ok1 ? '✅' : '❌'} render: mapped renders "色 名前"  ->  ${r1}`);
   console.log(`${ok2 ? '✅' : '❌'} render: host adds 👑           ->  ${r2}`);
   console.log(`${ok3 ? '✅' : '❌'} render: unmapped returns raw uuid  ->  ${r3}`);
@@ -251,10 +251,9 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
     makePrev([u(1), u(2)], 5),  // u(3) just joined, u(1)+u(2) already there
     {},
     { [u(1)]: 5, [u(2)]: 2, [u(3)]: 1 });
-  // each 全員 line should carry (N回目)
-  const ok = /  [^\s]+ \(5回目\)/.test(t)
-          && /  [^\s]+ \(2回目\)/.test(t)
-          && /  [^\s]+ \(1回目\)/.test(t);
+  // each 全員 line should carry (N回目). The line format is roughly
+  //   "  👤 <uuid> ... (N回目) ..."
+  const ok = /\(5回目\)/.test(t) && /\(2回目\)/.test(t) && /\(1回目\)/.test(t);
   console.log(`${ok ? '✅' : '❌'} buildText: 全員 list also shows "(N回目)" per user`);
   if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
   if (ok) pass++; else fail++;
