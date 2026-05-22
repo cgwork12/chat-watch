@@ -57,7 +57,21 @@ export function extractRoomFromHtml(html, id) {
   if (tm) {
     try { title = JSON.parse('"' + tm[1] + '"'); } catch { title = tm[1]; }
   }
-  return { _id: id, title, callUserIds, callLimit };
+  // update (last activity timestamp on the board) and messageLength (total chat
+  // count). We use these together to detect "ghost visits": when update advances
+  // sample-to-sample but callUserIds and messageLength haven't changed, somebody
+  // briefly joined and left in the gap.
+  let update = '';
+  const um = html.match(
+    new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?update\\\\":\\\\"([0-9T:.\\-Z]+)\\\\"`),
+  );
+  if (um) update = um[1];
+  let messageLength = 0;
+  const lm = html.match(
+    new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?messageLength\\\\":(\\d+)`),
+  );
+  if (lm) messageLength = Number(lm[1]);
+  return { _id: id, title, callUserIds, callLimit, update, messageLength };
 }
 
 async function fetchRoomById(id) {
@@ -231,7 +245,7 @@ export function decideTransition(prev, board) {
 // `mapping`   { [uuid]: {color, char, isHost} } — UUIDs rendered as "uuid (色 苗字)".
 // `joinCount` { [uuid]: number }                 — total joins observed so far,
 //                                                  appended as "(N回目)" on 入室 lines.
-export function buildText(board, decision, prev, mapping, joinCount, durations, now = new Date()) {
+export function buildText(board, decision, prev, mapping, joinCount, durations, now = new Date(), ghostVisitsToday = 0) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
@@ -273,6 +287,9 @@ export function buildText(board, decision, prev, mapping, joinCount, durations, 
   }
   lines.push(url);
   lines.push(`🕐 ${jstTimeString(now)}`);
+  if (Number(ghostVisitsToday) > 0) {
+    lines.push(`💨 一瞬の出入り（本日）: ${ghostVisitsToday}回`);
+  }
   return lines.join('\n');
 }
 
@@ -401,8 +418,31 @@ async function processSample(env, board, state, mapping) {
     durations[u] = { sessionMs: session, totalMs: totalMs[u] || 0 };  // totalMs already includes this session
   }
 
+  // Ghost-visit detection: someone joined and left between this sample and the
+  // previous one. Heuristic: board.update advanced AND callUserIds is unchanged
+  // AND messageLength didn't change (= it wasn't a chat that bumped update).
+  // Daily counter, resets at JST midnight.
+  let ghostVisitsToday = (state?.ghostResetDate === today)
+    ? Number(state?.ghostVisitsToday || 0)
+    : 0;
+  const prevUpdate = state?.boardUpdate || '';
+  const prevMsgLen = Number(state?.boardMessageLength) || 0;
+  const curUpdate = String(board.update || '');
+  const curMsgLen = Number(board.messageLength) || 0;
+  const callUserIdsUnchanged = justJoined.length === 0 && justLeft.length === 0;
+  if (
+    prevUpdate &&
+    curUpdate &&
+    curUpdate > prevUpdate &&
+    callUserIdsUnchanged &&
+    curMsgLen === prevMsgLen
+  ) {
+    ghostVisitsToday += 1;
+    console.log(`[ghost] ${titleForDisplay} update ${prevUpdate} → ${curUpdate} (count=${ghostVisitsToday})`);
+  }
+
   const decision = decideTransition(state, board);
-  const text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount, durations);
+  const text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount, durations, undefined, ghostVisitsToday);
   let notified = 0;
   if (text) {
     const ok = await postWebhook(env, text, decision?.kind || 'change');
@@ -421,6 +461,10 @@ async function processSample(env, board, state, mapping) {
       lastSeenDate,
       joinedAt,
       totalMs,
+      boardUpdate: curUpdate,
+      boardMessageLength: curMsgLen,
+      ghostVisitsToday,
+      ghostResetDate: today,
       lastSeenAt: nowIso,
     },
     notified,
@@ -431,10 +475,10 @@ export async function handleCron(env) {
   const t0 = Date.now();
   // Multi-sample within a single 1-minute cron tick to reduce latency between
   // when a join/leave actually happens and when we notify. Stays inside the
-  // free-plan 30s wall-clock budget: 6 samples × ~0.8s fetch + 5 sleeps × 4s ≈ 25s.
-  // Denser sampling (every 4s) catches short in-and-out events that 7s missed.
-  const SAMPLES = Number(env.SAMPLES_PER_TICK || 6);
-  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 4000);
+  // free-plan 30s wall-clock budget: 8 samples × ~0.8s fetch + 7 sleeps × 3s ≈ 27s.
+  // Denser sampling (every 3s) catches short in-and-out events that 4s missed.
+  const SAMPLES = Number(env.SAMPLES_PER_TICK || 8);
+  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 3000);
 
   // Load each room's KV state once. We use the room id from env.TARGET_ID for
   // the ID-watching path; the title-watching path still works but only on the
