@@ -71,7 +71,16 @@ export function extractRoomFromHtml(html, id) {
     new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?messageLength\\\\":(\\d+)`),
   );
   if (lm) messageLength = Number(lm[1]);
-  return { _id: id, title, callUserIds, callLimit, update, messageLength };
+  // userId2voiceChatInfo: anything inside this object changing (socketId,
+  // isMediaSoupSupported, mute flags, etc) means a voice state change that
+  // we want to *not* mistake for a ghost visit. We capture it as a raw
+  // string and compare sample-to-sample.
+  let voiceInfo = '';
+  const vm = html.match(
+    new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?userId2voiceChatInfo\\\\":(\\{[\\s\\S]*?\\}),\\\\"views\\\\":`),
+  );
+  if (vm) voiceInfo = vm[1];
+  return { _id: id, title, callUserIds, callLimit, update, messageLength, voiceInfo };
 }
 
 async function fetchRoomById(id) {
@@ -419,23 +428,28 @@ async function processSample(env, board, state, mapping) {
   }
 
   // Ghost-visit detection: someone joined and left between this sample and the
-  // previous one. Heuristic: board.update advanced AND callUserIds is unchanged
-  // AND messageLength didn't change (= it wasn't a chat that bumped update).
+  // previous one. Heuristic — board.update advanced AND
+  //   * callUserIds is unchanged (no join or leave we saw), AND
+  //   * messageLength didn't change (no chat), AND
+  //   * userId2voiceChatInfo is unchanged (no mute toggle / voice state change).
   // Daily counter, resets at JST midnight.
   let ghostVisitsToday = (state?.ghostResetDate === today)
     ? Number(state?.ghostVisitsToday || 0)
     : 0;
   const prevUpdate = state?.boardUpdate || '';
   const prevMsgLen = Number(state?.boardMessageLength) || 0;
+  const prevVoice = state?.boardVoiceInfo || '';
   const curUpdate = String(board.update || '');
   const curMsgLen = Number(board.messageLength) || 0;
+  const curVoice = String(board.voiceInfo || '');
   const callUserIdsUnchanged = justJoined.length === 0 && justLeft.length === 0;
   if (
     prevUpdate &&
     curUpdate &&
     curUpdate > prevUpdate &&
     callUserIdsUnchanged &&
-    curMsgLen === prevMsgLen
+    curMsgLen === prevMsgLen &&
+    curVoice === prevVoice
   ) {
     ghostVisitsToday += 1;
     console.log(`[ghost] ${titleForDisplay} update ${prevUpdate} → ${curUpdate} (count=${ghostVisitsToday})`);
@@ -463,6 +477,7 @@ async function processSample(env, board, state, mapping) {
       totalMs,
       boardUpdate: curUpdate,
       boardMessageLength: curMsgLen,
+      boardVoiceInfo: curVoice,
       ghostVisitsToday,
       ghostResetDate: today,
       lastSeenAt: nowIso,
