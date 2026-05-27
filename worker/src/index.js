@@ -499,6 +499,7 @@ export async function handleCron(env) {
   // the ID-watching path; the title-watching path still works but only on the
   // first sample (we re-find the matched rooms each sample anyway).
   const stateCache = new Map();   // stateKey -> in-memory state
+  const stateOrigRaw = new Map(); // stateKey -> raw JSON string as read from KV
   let totalNotified = 0;
   let lastPagesInfo = '';
 
@@ -540,6 +541,7 @@ export async function handleCron(env) {
       let state = stateCache.get(stateKey);
       if (state === undefined) {
         const raw = await env.STATE.get(stateKey);
+        stateOrigRaw.set(stateKey, raw || '');
         state = raw ? JSON.parse(raw) : null;
       }
       const mapping = await loadBindings(board._id);
@@ -549,13 +551,35 @@ export async function handleCron(env) {
     }
   }
 
-  // Persist once at the end (one KV write per room per cron tick)
+  // Persist at the end, but ONLY if the state actually changed materially —
+  // i.e. anything beyond the lastSeenAt timestamp. The Workers free plan
+  // allows 1,000 KV writes/day per binding and a blind 1-write-per-tick
+  // pattern (1,440/day) quietly hit the cap, causing later writes to fail
+  // silently — the watched room appeared "stuck at 0 people" and every
+  // tick re-fired the same `started` notification. Skip writes when only
+  // lastSeenAt would change.
+  let writes = 0;
+  let skipped = 0;
   for (const [stateKey, state] of stateCache) {
-    await env.STATE.put(stateKey, JSON.stringify(state));
+    const nextStable = JSON.stringify({ ...state, lastSeenAt: '' });
+    const prevRaw = stateOrigRaw.get(stateKey) || '';
+    let prevStable = '';
+    if (prevRaw) {
+      try { prevStable = JSON.stringify({ ...JSON.parse(prevRaw), lastSeenAt: '' }); } catch {}
+    }
+    if (nextStable === prevStable) { skipped++; continue; }
+    try {
+      await env.STATE.put(stateKey, JSON.stringify(state));
+      writes++;
+    } catch (e) {
+      // 429 / write-limit exceeded surfaces here; log so it's not silent.
+      console.warn(`KV put failed for ${stateKey}: ${e?.message || e}`);
+    }
   }
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(`samples=${SAMPLES} ${lastPagesInfo}, rooms=${stateCache.size}, notified=${totalNotified}, elapsed=${elapsed}s`);
+  console.log(`samples=${SAMPLES} ${lastPagesInfo}, rooms=${stateCache.size}, ` +
+    `notified=${totalNotified}, writes=${writes}, skipped=${skipped}, elapsed=${elapsed}s`);
 }
 
 export default {
