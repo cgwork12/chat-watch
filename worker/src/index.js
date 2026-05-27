@@ -39,47 +39,99 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
 export function extractRoomFromHtml(html, id) {
-  if (!html.includes(id)) return null;
-  // Anchor on the room's _id, then capture callUserIds and callLimit that
-  // appear later within a bounded window (same JSON object).
-  const blockRe = new RegExp(
-    `\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?callUserIds\\\\":\\[([^\\]]*)\\][\\s\\S]{0,500}?callLimit\\\\":(\\d+)`,
-  );
-  const m = html.match(blockRe);
-  if (!m) return null;
-  const callUserIds = m[1].match(UUID_RE) || [];
-  const callLimit = Number(m[2]);
-  // Title is right after _id. Best effort; fall back to empty.
+  // Index-based parsing instead of regex. The previous regex implementation
+  // hit "Exceeded CPU Limit" on the Workers free plan because `[\s\S]*?`
+  // patterns over 86 KB of HTML × 8 samples × 6 fields per sample added up.
+  // indexOf + slice is O(N) per call with no backtracking, dropping the
+  // parse cost dramatically.
+  const idAnchor = `\\"_id\\":\\"${id}\\"`;
+  const idIdx = html.indexOf(idAnchor);
+  if (idIdx === -1) return null;
+  // Limit our scans to a window right after _id (same JSON object).
+  const region = html.slice(idIdx, idIdx + 4000);
+
+  // title
   let title = '';
-  const tm = html.match(
-    new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\",\\\\"title\\\\":\\\\"([\\s\\S]*?)\\\\",\\\\"category\\\\"`),
-  );
-  if (tm) {
-    try { title = JSON.parse('"' + tm[1] + '"'); } catch { title = tm[1]; }
+  {
+    const k = '\\"title\\":\\"';
+    const t = region.indexOf(k);
+    if (t >= 0) {
+      const s = t + k.length;
+      const e = region.indexOf('\\",\\"category\\"', s);
+      if (e >= 0) {
+        try { title = JSON.parse('"' + region.slice(s, e) + '"'); }
+        catch { title = region.slice(s, e); }
+      }
+    }
   }
-  // update (last activity timestamp on the board) and messageLength (total chat
-  // count). We use these together to detect "ghost visits": when update advances
-  // sample-to-sample but callUserIds and messageLength haven't changed, somebody
-  // briefly joined and left in the gap.
+  // callUserIds: [ "uuid", "uuid", ... ]
+  let callUserIds = [];
+  {
+    const k = '\\"callUserIds\\":[';
+    const c = region.indexOf(k);
+    if (c >= 0) {
+      const s = c + k.length;
+      const e = region.indexOf(']', s);
+      if (e >= 0) callUserIds = region.slice(s, e).match(UUID_RE) || [];
+    }
+  }
+  // callLimit (small integer immediately after the label)
+  let callLimit = 0;
+  {
+    const k = '\\"callLimit\\":';
+    const c = region.indexOf(k);
+    if (c >= 0) {
+      let d = '';
+      for (let i = c + k.length; i < region.length; i++) {
+        const ch = region[i];
+        if (ch >= '0' && ch <= '9') d += ch; else break;
+      }
+      callLimit = Number(d) || 0;
+    }
+  }
+  // update: ISO timestamp string
   let update = '';
-  const um = html.match(
-    new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?update\\\\":\\\\"([0-9T:.\\-Z]+)\\\\"`),
-  );
-  if (um) update = um[1];
+  {
+    const k = '\\"update\\":\\"';
+    const c = region.indexOf(k);
+    if (c >= 0) {
+      const s = c + k.length;
+      const e = region.indexOf('\\"', s);
+      if (e >= 0) update = region.slice(s, e);
+    }
+  }
+  // messageLength
   let messageLength = 0;
-  const lm = html.match(
-    new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?messageLength\\\\":(\\d+)`),
-  );
-  if (lm) messageLength = Number(lm[1]);
-  // userId2voiceChatInfo: anything inside this object changing (socketId,
-  // isMediaSoupSupported, mute flags, etc) means a voice state change that
-  // we want to *not* mistake for a ghost visit. We capture it as a raw
-  // string and compare sample-to-sample.
+  {
+    const k = '\\"messageLength\\":';
+    const c = region.indexOf(k);
+    if (c >= 0) {
+      let d = '';
+      for (let i = c + k.length; i < region.length; i++) {
+        const ch = region[i];
+        if (ch >= '0' && ch <= '9') d += ch; else break;
+      }
+      messageLength = Number(d) || 0;
+    }
+  }
+  // userId2voiceChatInfo: walk braces to find the matching close.
   let voiceInfo = '';
-  const vm = html.match(
-    new RegExp(`\\\\"_id\\\\":\\\\"${id}\\\\"[\\s\\S]{0,4000}?userId2voiceChatInfo\\\\":(\\{[\\s\\S]*?\\}),\\\\"views\\\\":`),
-  );
-  if (vm) voiceInfo = vm[1];
+  {
+    const k = '\\"userId2voiceChatInfo\\":';
+    const c = region.indexOf(k);
+    if (c >= 0 && region[c + k.length] === '{') {
+      const s = c + k.length;
+      let depth = 0;
+      for (let i = s; i < region.length; i++) {
+        const ch = region[i];
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) { voiceInfo = region.slice(s, i + 1); break; }
+        }
+      }
+    }
+  }
   return { _id: id, title, callUserIds, callLimit, update, messageLength, voiceInfo };
 }
 
