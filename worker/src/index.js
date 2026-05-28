@@ -217,15 +217,16 @@ export function colorName(hex) {
   return m[hex.toLowerCase()] || hex;
 }
 
-export function renderUuidWithIcon(uuid, mapping) {
+export function renderUuidWithIcon(uuid, mapping, suffixBeforeUuid = '') {
   const icon = mapping?.[uuid];
-  if (!icon) return `👤 ${uuid}`;
+  if (!icon) return `👤 ${uuid}${suffixBeforeUuid}`;
   const name = icon.char || '';
   const color = colorName(icon.color);
   const host = icon.isHost ? ' 👑' : '';
-  // Name first so the user can identify who at a glance; UUID kept in parens
-  // for disambiguation when names collide or are unbound.
-  return `👤 ${color} ${name}${host} (${uuid})`;
+  // Name first so the user can identify who at a glance; optional suffix
+  // (e.g. "(N回目)") goes between the name and the UUID; UUID at the end
+  // in parens for disambiguation when names collide or are unbound.
+  return `👤 ${color} ${name}${host}${suffixBeforeUuid} (${uuid})`;
 }
 
 // Greedy attribution: if exactly 1 UUID joined this tick AND there is a chat
@@ -332,7 +333,6 @@ export function buildText(board, decision, prev, mapping, joinCount, durations, 
     header = `🔵 「${board.title}」 ${prevIds.length}/${limit} → ${curIds.length}/${limit}`;
   }
 
-  const r = (u) => renderUuidWithIcon(u, mapping || {});
   const visit = (u) => {
     const n = (joinCount && joinCount[u]) || 0;
     return n > 0 ? ` (${n}回目)` : '';
@@ -342,11 +342,13 @@ export function buildText(board, decision, prev, mapping, joinCount, durations, 
     if (!d) return '';
     return ` (滞在 ${formatDuration(d.sessionMs)} / 総 ${formatDuration(d.totalMs)})`;
   };
+  // Compose: 👤 色 名前 👑 (N回目) (uuid) (滞在 ... / 総 ...)
+  const r = (u, showVisit) => renderUuidWithIcon(u, mapping || {}, showVisit ? visit(u) : '');
   const lines = [header];
-  for (const u of joined) lines.push(`+ 入室: ${r(u)}${visit(u)}${stay(u)}`);
-  for (const u of left) lines.push(`- 退室: ${r(u)}${stay(u)}`);
+  for (const u of joined) lines.push(`+ 入室: ${r(u, true)}${stay(u)}`);
+  for (const u of left) lines.push(`- 退室: ${r(u, false)}${stay(u)}`);
   if (curIds.length > 0) {
-    lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u)}${visit(u)}${stay(u)}`).join('\n')}`);
+    lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u, true)}${stay(u)}`).join('\n')}`);
   }
   lines.push(url);
   lines.push(`🕐 ${jstTimeString(now)}`);

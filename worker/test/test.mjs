@@ -339,7 +339,7 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
     { [u(1)]: 3 },
     durations,
     new Date('2026-05-13T06:32:15Z'));
-  const ok = /\+ 入室:.*\(3回目\) \(滞在 0秒 \/ 総 2時間2分\)/.test(t);
+  const ok = /\+ 入室:.*\(3回目\).*\(滞在 0秒 \/ 総 2時間2分\)/.test(t);
   console.log(`${ok ? '✅' : '❌'} buildText: 入室 line shows session + total`);
   if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
   if (ok) pass++; else fail++;
