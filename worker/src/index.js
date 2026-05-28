@@ -223,7 +223,9 @@ export function renderUuidWithIcon(uuid, mapping) {
   const name = icon.char || '';
   const color = colorName(icon.color);
   const host = icon.isHost ? ' 👑' : '';
-  return `👤 ${uuid} (${color} ${name}${host})`;
+  // Name first so the user can identify who at a glance; UUID kept in parens
+  // for disambiguation when names collide or are unbound.
+  return `👤 ${color} ${name}${host} (${uuid})`;
 }
 
 // Greedy attribution: if exactly 1 UUID joined this tick AND there is a chat
