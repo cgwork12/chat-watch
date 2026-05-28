@@ -306,7 +306,7 @@ export function decideTransition(prev, board) {
 // `mapping`   { [uuid]: {color, char, isHost} } — UUIDs rendered as "uuid (色 苗字)".
 // `joinCount` { [uuid]: number }                 — total joins observed so far,
 //                                                  appended as "(N回目)" on 入室 lines.
-export function buildText(board, decision, prev, mapping, joinCount, durations, now = new Date(), ghostVisitsToday = 0) {
+export function buildText(board, decision, prev, mapping, joinCount, durations, now = new Date()) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
@@ -348,9 +348,6 @@ export function buildText(board, decision, prev, mapping, joinCount, durations, 
   }
   lines.push(url);
   lines.push(`🕐 ${jstTimeString(now)}`);
-  if (Number(ghostVisitsToday) > 0) {
-    lines.push(`💨 一瞬の出入り（本日）: ${ghostVisitsToday}回`);
-  }
   return lines.join('\n');
 }
 
@@ -431,84 +428,75 @@ async function processSample(env, board, state, mapping) {
   const curSet = new Set(curIds);
   const justJoined = curIds.filter((u) => !prevSet.has(u));
   const justLeft = prevIds.filter((u) => !curSet.has(u));
+  // Track whether anything material changed so we can skip the end-of-tick
+  // KV write when nothing happened — avoids the cost of a JSON deep-compare
+  // and keeps daily KV writes well under the 1,000/day free-plan budget.
+  let dirty = justJoined.length > 0 || justLeft.length > 0;
 
   // Distinct-days count: each UUID counts +1 for each calendar day (JST) it
   // appeared. Multiple re-entries within the same day stay at the same count.
   // So "(3回目)" means "3 distinct days seen", not "3 entries".
   const today = jstDateString();
-  const dayCount = { ...(state?.dayCount || {}) };
-  const lastSeenDate = { ...(state?.lastSeenDate || {}) };
+  let dayCount = state?.dayCount;
+  let lastSeenDate = state?.lastSeenDate;
+  // Lazy copy: only clone the maps if we actually need to mutate them.
   for (const u of justJoined) {
-    if (lastSeenDate[u] !== today) {
+    if (lastSeenDate?.[u] !== today) {
+      if (!dirty || dayCount === state?.dayCount) {
+        dayCount = { ...(state?.dayCount || {}) };
+        lastSeenDate = { ...(state?.lastSeenDate || {}) };
+      }
       dayCount[u] = (dayCount[u] || 0) + 1;
       lastSeenDate[u] = today;
+      dirty = true;
     }
   }
+  if (!dayCount) dayCount = state?.dayCount || {};
+  if (!lastSeenDate) lastSeenDate = state?.lastSeenDate || {};
 
   // Session timing.
   //   joinedAt[u] = ISO string of when the current (uncompleted) session began
   //   totalMs[u]  = sum of all completed sessions for u, in ms
+  // Lazy copy: only allocate new maps when we actually mutate. For idle
+  // ticks (no joins, no leaves) we just reuse the references from state.
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
   const oldJoinedAt = state?.joinedAt || {};
-  const joinedAt = { ...oldJoinedAt };
-  const totalMs = { ...(state?.totalMs || {}) };
-
-  // Departed this tick: close their session, add to totalMs, drop joinedAt
-  for (const u of justLeft) {
-    const ja = Date.parse(oldJoinedAt[u] || '');
-    if (Number.isFinite(ja)) totalMs[u] = (totalMs[u] || 0) + (nowMs - ja);
-    delete joinedAt[u];
-  }
-  // Newly joined: start a fresh session
-  for (const u of justJoined) joinedAt[u] = nowIso;
-  // First-ever observation of an existing member (e.g. seeded by migration):
-  // give them a joinedAt of "now" so we start counting from here
-  for (const u of curIds) if (!joinedAt[u]) joinedAt[u] = nowIso;
-
-  // Build durations map used by buildText: per-UUID { sessionMs, totalMs }
-  const durations = {};
-  for (const u of curIds) {
-    const ja = Date.parse(oldJoinedAt[u] || '');
-    const session = Number.isFinite(ja) && !justJoined.includes(u) ? (nowMs - ja) : 0;
-    durations[u] = { sessionMs: session, totalMs: (state?.totalMs?.[u] || 0) + session };
-  }
-  for (const u of justLeft) {
-    const ja = Date.parse(oldJoinedAt[u] || '');
-    const session = Number.isFinite(ja) ? (nowMs - ja) : 0;
-    durations[u] = { sessionMs: session, totalMs: totalMs[u] || 0 };  // totalMs already includes this session
+  let joinedAt = oldJoinedAt;
+  let totalMs = state?.totalMs || {};
+  const needsBackfill = curIds.some((u) => !oldJoinedAt[u]);
+  if (justJoined.length > 0 || justLeft.length > 0 || needsBackfill) {
+    joinedAt = { ...oldJoinedAt };
+    totalMs = { ...(state?.totalMs || {}) };
+    for (const u of justLeft) {
+      const ja = Date.parse(oldJoinedAt[u] || '');
+      if (Number.isFinite(ja)) totalMs[u] = (totalMs[u] || 0) + (nowMs - ja);
+      delete joinedAt[u];
+    }
+    for (const u of justJoined) joinedAt[u] = nowIso;
+    for (const u of curIds) if (!joinedAt[u]) joinedAt[u] = nowIso;
+    dirty = true;
   }
 
-  // Ghost-visit detection: someone joined and left between this sample and the
-  // previous one. Heuristic — board.update advanced AND
-  //   * callUserIds is unchanged (no join or leave we saw), AND
-  //   * messageLength didn't change (no chat), AND
-  //   * userId2voiceChatInfo is unchanged (no mute toggle / voice state change).
-  // Daily counter, resets at JST midnight.
-  let ghostVisitsToday = (state?.ghostResetDate === today)
-    ? Number(state?.ghostVisitsToday || 0)
-    : 0;
-  const prevUpdate = state?.boardUpdate || '';
-  const prevMsgLen = Number(state?.boardMessageLength) || 0;
-  const prevVoice = state?.boardVoiceInfo || '';
-  const curUpdate = String(board.update || '');
-  const curMsgLen = Number(board.messageLength) || 0;
-  const curVoice = String(board.voiceInfo || '');
-  const callUserIdsUnchanged = justJoined.length === 0 && justLeft.length === 0;
-  if (
-    prevUpdate &&
-    curUpdate &&
-    curUpdate > prevUpdate &&
-    callUserIdsUnchanged &&
-    curMsgLen === prevMsgLen &&
-    curVoice === prevVoice
-  ) {
-    ghostVisitsToday += 1;
-    console.log(`[ghost] ${titleForDisplay} update ${prevUpdate} → ${curUpdate} (count=${ghostVisitsToday})`);
+  // Build durations map (only needed if we'll actually send a notification).
+  // Notifications fire only when there's at least one join or leave.
+  let durations = null;
+  if (justJoined.length > 0 || justLeft.length > 0) {
+    durations = {};
+    for (const u of curIds) {
+      const ja = Date.parse(oldJoinedAt[u] || '');
+      const session = Number.isFinite(ja) && !justJoined.includes(u) ? (nowMs - ja) : 0;
+      durations[u] = { sessionMs: session, totalMs: (state?.totalMs?.[u] || 0) + session };
+    }
+    for (const u of justLeft) {
+      const ja = Date.parse(oldJoinedAt[u] || '');
+      const session = Number.isFinite(ja) ? (nowMs - ja) : 0;
+      durations[u] = { sessionMs: session, totalMs: totalMs[u] || 0 };
+    }
   }
 
   const decision = decideTransition(state, board);
-  const text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount, durations, undefined, ghostVisitsToday);
+  const text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount, durations);
   let notified = 0;
   if (text) {
     const ok = await postWebhook(env, text, decision?.kind || 'change');
@@ -527,14 +515,10 @@ async function processSample(env, board, state, mapping) {
       lastSeenDate,
       joinedAt,
       totalMs,
-      boardUpdate: curUpdate,
-      boardMessageLength: curMsgLen,
-      boardVoiceInfo: curVoice,
-      ghostVisitsToday,
-      ghostResetDate: today,
       lastSeenAt: nowIso,
     },
     notified,
+    dirty,
   };
 }
 
@@ -542,16 +526,18 @@ export async function handleCron(env) {
   const t0 = Date.now();
   // Multi-sample within a single 1-minute cron tick to reduce latency between
   // when a join/leave actually happens and when we notify. Stays inside the
-  // free-plan 30s wall-clock budget: 8 samples × ~0.8s fetch + 7 sleeps × 3s ≈ 27s.
-  // Denser sampling (every 3s) catches short in-and-out events that 4s missed.
-  const SAMPLES = Number(env.SAMPLES_PER_TICK || 8);
-  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 3000);
+  // free-plan budgets: 30s wall clock, 10ms CPU per request. 6 samples × ~0.8s
+  // fetch + 5 sleeps × 4s ≈ 25s wall. 8 samples × 3s briefly worked but tipped
+  // over the CPU budget on busy ticks (the HTML decode + state copies summed
+  // past 10ms), causing writes to be killed before persisting.
+  const SAMPLES = Number(env.SAMPLES_PER_TICK || 6);
+  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 4000);
 
   // Load each room's KV state once. We use the room id from env.TARGET_ID for
   // the ID-watching path; the title-watching path still works but only on the
   // first sample (we re-find the matched rooms each sample anyway).
   const stateCache = new Map();   // stateKey -> in-memory state
-  const stateOrigRaw = new Map(); // stateKey -> raw JSON string as read from KV
+  const stateDirty = new Set();   // stateKeys with material changes that need a write
   let totalNotified = 0;
   let lastPagesInfo = '';
 
@@ -593,38 +579,30 @@ export async function handleCron(env) {
       let state = stateCache.get(stateKey);
       if (state === undefined) {
         const raw = await env.STATE.get(stateKey);
-        stateOrigRaw.set(stateKey, raw || '');
         state = raw ? JSON.parse(raw) : null;
       }
       const mapping = await loadBindings(board._id);
-      const { next, notified } = await processSample(env, board, state, mapping);
+      const { next, notified, dirty } = await processSample(env, board, state, mapping);
       totalNotified += notified;
       stateCache.set(stateKey, next);
+      if (dirty) stateDirty.add(stateKey);
     }
   }
 
-  // Persist at the end, but ONLY if the state actually changed materially —
-  // i.e. anything beyond the lastSeenAt timestamp. The Workers free plan
-  // allows 1,000 KV writes/day per binding and a blind 1-write-per-tick
-  // pattern (1,440/day) quietly hit the cap, causing later writes to fail
-  // silently — the watched room appeared "stuck at 0 people" and every
-  // tick re-fired the same `started` notification. Skip writes when only
-  // lastSeenAt would change.
+  // Persist at the end, but ONLY for rooms whose state actually changed
+  // materially. processSample sets `dirty` when there was a join/leave, a
+  // dayCount bump, a session close, or a ghost-visit increment. Skipping
+  // writes when nothing happened keeps daily KV writes well under the
+  // free-plan 1,000/day cap and avoids extra CPU spent on big JSON
+  // comparisons.
   let writes = 0;
   let skipped = 0;
   for (const [stateKey, state] of stateCache) {
-    const nextStable = JSON.stringify({ ...state, lastSeenAt: '' });
-    const prevRaw = stateOrigRaw.get(stateKey) || '';
-    let prevStable = '';
-    if (prevRaw) {
-      try { prevStable = JSON.stringify({ ...JSON.parse(prevRaw), lastSeenAt: '' }); } catch {}
-    }
-    if (nextStable === prevStable) { skipped++; continue; }
+    if (!stateDirty.has(stateKey)) { skipped++; continue; }
     try {
       await env.STATE.put(stateKey, JSON.stringify(state));
       writes++;
     } catch (e) {
-      // 429 / write-limit exceeded surfaces here; log so it's not silent.
       console.warn(`KV put failed for ${stateKey}: ${e?.message || e}`);
     }
   }
