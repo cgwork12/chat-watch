@@ -424,7 +424,7 @@ export function formatDuration(ms) {
 // `mapping` is read separately (from the bindings KV key, never written by
 // cron) so that manual binds survive eventual-consistency races with the
 // cron-managed state key.
-async function processSample(env, board, state, mapping) {
+async function processSample(env, board, state, loadMapping) {
   const titleForDisplay = board.title || state?.title || '(タイトル不明)';
   const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
   const prevIds = Array.isArray(state?.callUserIds) ? state.callUserIds : [];
@@ -500,7 +500,12 @@ async function processSample(env, board, state, mapping) {
   }
 
   const decision = decideTransition(state, board);
-  const text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount, durations);
+  let text = null;
+  if (justJoined.length > 0 || justLeft.length > 0) {
+    // Only load bindings (KV.list + N gets) when we actually need them.
+    const mapping = await loadMapping();
+    text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount, durations);
+  }
   let notified = 0;
   if (text) {
     const ok = await postWebhook(env, text, decision?.kind || 'change');
@@ -530,12 +535,13 @@ export async function handleCron(env) {
   const t0 = Date.now();
   // Multi-sample within a single 1-minute cron tick to reduce latency between
   // when a join/leave actually happens and when we notify. Stays inside the
-  // free-plan budgets: 30s wall clock, 10ms CPU per request. 6 samples × ~0.8s
-  // fetch + 5 sleeps × 4s ≈ 25s wall. 8 samples × 3s briefly worked but tipped
-  // over the CPU budget on busy ticks (the HTML decode + state copies summed
-  // past 10ms), causing writes to be killed before persisting.
-  const SAMPLES = Number(env.SAMPLES_PER_TICK || 6);
-  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 4000);
+  // free-plan budgets: 30s wall clock, 10ms CPU per request. 4 samples × ~0.8s
+  // fetch + 3 sleeps × 5s ≈ 23s wall. Earlier denser settings (6×4s, 8×3s)
+  // intermittently tripped "Exceeded CPU Limit" on busy ticks, killing
+  // env.STATE.put before the state could persist and causing the same
+  // notification to re-fire each subsequent tick. Erring on the safe side.
+  const SAMPLES = Number(env.SAMPLES_PER_TICK || 4);
+  const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 5000);
 
   // Load each room's KV state once. We use the room id from env.TARGET_ID for
   // the ID-watching path; the title-watching path still works but only on the
@@ -585,8 +591,11 @@ export async function handleCron(env) {
         const raw = await env.STATE.get(stateKey);
         state = raw ? JSON.parse(raw) : null;
       }
-      const mapping = await loadBindings(board._id);
-      const { next, notified, dirty } = await processSample(env, board, state, mapping);
+      // Bindings are only needed when we actually emit a notification, so
+      // defer the KV.list + per-key gets to inside processSample's notify
+      // path. For idle ticks this saves ~30 KV ops worth of CPU.
+      const loadMapping = () => loadBindings(board._id);
+      const { next, notified, dirty } = await processSample(env, board, state, loadMapping);
       totalNotified += notified;
       stateCache.set(stateKey, next);
       if (dirty) stateDirty.add(stateKey);
