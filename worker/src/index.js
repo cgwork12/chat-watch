@@ -12,8 +12,9 @@
 //   and `callLimit` remain. So this watcher is COUNT-BASED: it can tell how
 //   many people are in the room, but NOT who. Per-person features that used to
 //   exist (names, "(N回目)", 滞在/総 time, UUID→name bindings) are no longer
-//   possible from public data and have been removed. Notifications now fire on
-//   the 4 count transitions only.
+//   possible from public data and have been removed. Notifications fire on the
+//   4 count transitions (with @everyone) plus a generic 🔵 message on any
+//   other count change (no mention).
 //
 // Setup (see ../README.md):
 //   wrangler kv namespace create STATE     -> id      -> wrangler.toml
@@ -171,24 +172,27 @@ export function decideTransition(prev, board) {
   return kind ? { kind, prevNum, curNum, limit } : null;
 }
 
-// Build the notification body for one of the 4 transitions. Returns null when
-// there is no transition (so mid-room churn and no-change ticks are silent).
-export function buildText(board, decision, now = new Date()) {
-  if (!decision) return null;
+// Build the notification body. The 4 transitions get their own headers; any
+// other occupant-count change (mid-room churn like 4→2) gets a generic 🔵
+// header so Discord always shows the current count. `prevNum` is the count
+// we last stored; pass null on first sight to stay silent. Returns null when
+// there is nothing to say (no transition and count unchanged).
+export function buildText(board, decision, prevNum = null, now = new Date()) {
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
   const limit = Number(board.callLimit) || 0;
   const cur = Number(board.callNum) || 0;
-  const prevNum = decision.prevNum;
 
   let header;
-  if (decision.kind === 'started') {
+  if (decision?.kind === 'started') {
     header = `🟢 「${board.title}」が始まりました\n0 → ${cur}/${limit}`;
-  } else if (decision.kind === 'becameFull') {
-    header = `🔴 「${board.title}」が満室になりました\n${prevNum}/${limit} → 満室(${cur}/${limit})`;
-  } else if (decision.kind === 'opened') {
-    header = `🟡 「${board.title}」に空きが出ました\n満室(${prevNum}/${limit}) → ${cur}/${limit}`;
-  } else if (decision.kind === 'ended') {
-    header = `⚫ 「${board.title}」の通話が終了しました\n${prevNum}/${limit} → 0/${limit}`;
+  } else if (decision?.kind === 'becameFull') {
+    header = `🔴 「${board.title}」が満室になりました\n${decision.prevNum}/${limit} → 満室(${cur}/${limit})`;
+  } else if (decision?.kind === 'opened') {
+    header = `🟡 「${board.title}」に空きが出ました\n満室(${decision.prevNum}/${limit}) → ${cur}/${limit}`;
+  } else if (decision?.kind === 'ended') {
+    header = `⚫ 「${board.title}」の通話が終了しました\n${decision.prevNum}/${limit} → 0/${limit}`;
+  } else if (prevNum != null && prevNum !== cur) {
+    header = `🔵 「${board.title}」 ${prevNum}/${limit} → ${cur}/${limit}`;
   } else {
     return null;
   }
@@ -254,15 +258,17 @@ async function processSample(env, board, state) {
   const prevNum = Number.isFinite(state?.callNum) ? state.callNum : null;
   const prevLimit = Number.isFinite(state?.callLimit) ? state.callLimit : null;
 
+  // Notify on the 4 transitions AND on any other count change (🔵 generic,
+  // no @everyone — postWebhook only mentions for IMPORTANT_KINDS). First
+  // sight (state == null) stays silent: prevNum is null so buildText skips.
   const decision = decideTransition(state, board);
   let notified = 0;
-  if (decision) {
-    const text = buildText({ ...board, title: titleForDisplay }, decision);
-    if (text) {
-      const ok = await postWebhook(env, text, decision.kind);
-      if (ok) notified = 1;
-      console.log(`[${decision.kind}] ${titleForDisplay} ${decision.prevNum}->${decision.curNum}/${curLimit}`);
-    }
+  const text = buildText({ ...board, title: titleForDisplay }, decision, prevNum);
+  if (text) {
+    const kind = decision?.kind || 'change';
+    const ok = await postWebhook(env, text, kind);
+    if (ok) notified = 1;
+    console.log(`[${kind}] ${titleForDisplay} ${prevNum}->${curNum}/${curLimit}`);
   }
 
   // Persist when this is the first observation, or the count / limit changed.

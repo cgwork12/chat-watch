@@ -94,9 +94,21 @@ for (const [label, html, expected] of htmlCases) {
 const bd = (n, limit, title = 't', _id = 'roomid') => ({ _id, title, callNum: n, callLimit: limit });
 
 const textCases = [
-  ['no transition -> null',
+  ['no transition, no prevNum (first sight) -> null',
     () => buildText(bd(2, 5), null),
     null],
+
+  ['no transition, count unchanged -> null',
+    () => buildText(bd(2, 5), null, 2),
+    null],
+
+  ['mid-room churn 4->2 uses 🔵 generic header',
+    () => buildText(bd(2, 5, 'ながら雑談'), null, 4),
+    [/🔵 「ながら雑談」 4\/5 → 2\/5/]],
+
+  ['mid-room churn 1->2 uses 🔵 generic header',
+    () => buildText(bd(2, 5), null, 1),
+    [/🔵.*1\/5 → 2\/5/]],
 
   ['started uses 🟢 wording',
     () => buildText(bd(1, 5, 'ながら雑談'), { kind: 'started', prevNum: 0, curNum: 1, limit: 5 }),
@@ -142,7 +154,7 @@ for (const [label, gen, expected] of textCases) {
 // ---------- buildText ends with 🕐 HH:MM:SS (JST) ----------
 {
   const t = buildText(bd(1, 5), { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
-    new Date('2026-05-13T06:32:15Z'));
+    0, new Date('2026-05-13T06:32:15Z'));
   const ok = /🕐 15:32:15$/.test(t);
   console.log(`${ok ? '✅' : '❌'} buildText: ends with 🕐 HH:MM:SS in JST`);
   if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
