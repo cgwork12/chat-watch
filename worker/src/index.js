@@ -6,6 +6,15 @@
 //   accounts can be delayed 20-30 minutes between fires. Cloudflare Worker cron
 //   runs every 60 seconds reliably.
 //
+// Occupancy model (IMPORTANT — changed 2026-07):
+//   randomchat stopped exposing the participant UUID list (`callUserIds`) in
+//   its public data (SSR page + list API). Only the OCCUPANT COUNT (`callNum`)
+//   and `callLimit` remain. So this watcher is COUNT-BASED: it can tell how
+//   many people are in the room, but NOT who. Per-person features that used to
+//   exist (names, "(N回目)", 滞在/総 time, UUID→name bindings) are no longer
+//   possible from public data and have been removed. Notifications now fire on
+//   the 4 count transitions only.
+//
 // Setup (see ../README.md):
 //   wrangler kv namespace create STATE     -> id      -> wrangler.toml
 //   wrangler kv namespace create STATE --preview -> preview_id
@@ -14,7 +23,7 @@
 //   wrangler deploy
 //
 // State key schema in KV (binding STATE):
-//   key "room:<id>"   value JSON {title, callNum, callLimit, callUserIds, lastSeenAt}
+//   key "room:<id>"   value JSON {title, callNum, callLimit, lastSeenAt}
 
 const API_BASE = 'https://rc.pnyo.jp/api/web/boards/calls';
 const HEADERS = {
@@ -36,14 +45,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 //   inside JS strings, so values appear with `\"` escaping.
 // ---------------------------------------------------------------------------
 
-const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+// Read a small non-negative integer that appears immediately after `label`
+// inside the escaped-JSON region (e.g. `\"callNum\":3`).
+function readIntAfter(region, label) {
+  const c = region.indexOf(label);
+  if (c < 0) return null;
+  let d = '';
+  for (let i = c + label.length; i < region.length; i++) {
+    const ch = region[i];
+    if (ch >= '0' && ch <= '9') d += ch; else break;
+  }
+  return d === '' ? null : Number(d);
+}
 
 export function extractRoomFromHtml(html, id) {
   // Index-based parsing instead of regex. The previous regex implementation
   // hit "Exceeded CPU Limit" on the Workers free plan because `[\s\S]*?`
-  // patterns over 86 KB of HTML × 8 samples × 6 fields per sample added up.
-  // indexOf + slice is O(N) per call with no backtracking, dropping the
-  // parse cost dramatically.
+  // patterns over 86 KB of HTML × N samples added up. indexOf + slice is O(N)
+  // per call with no backtracking, dropping the parse cost dramatically.
   const idAnchor = `\\"_id\\":\\"${id}\\"`;
   const idIdx = html.indexOf(idAnchor);
   if (idIdx === -1) return null;
@@ -64,75 +83,13 @@ export function extractRoomFromHtml(html, id) {
       }
     }
   }
-  // callUserIds: [ "uuid", "uuid", ... ]
-  let callUserIds = [];
-  {
-    const k = '\\"callUserIds\\":[';
-    const c = region.indexOf(k);
-    if (c >= 0) {
-      const s = c + k.length;
-      const e = region.indexOf(']', s);
-      if (e >= 0) callUserIds = region.slice(s, e).match(UUID_RE) || [];
-    }
-  }
-  // callLimit (small integer immediately after the label)
-  let callLimit = 0;
-  {
-    const k = '\\"callLimit\\":';
-    const c = region.indexOf(k);
-    if (c >= 0) {
-      let d = '';
-      for (let i = c + k.length; i < region.length; i++) {
-        const ch = region[i];
-        if (ch >= '0' && ch <= '9') d += ch; else break;
-      }
-      callLimit = Number(d) || 0;
-    }
-  }
-  // update: ISO timestamp string
-  let update = '';
-  {
-    const k = '\\"update\\":\\"';
-    const c = region.indexOf(k);
-    if (c >= 0) {
-      const s = c + k.length;
-      const e = region.indexOf('\\"', s);
-      if (e >= 0) update = region.slice(s, e);
-    }
-  }
-  // messageLength
-  let messageLength = 0;
-  {
-    const k = '\\"messageLength\\":';
-    const c = region.indexOf(k);
-    if (c >= 0) {
-      let d = '';
-      for (let i = c + k.length; i < region.length; i++) {
-        const ch = region[i];
-        if (ch >= '0' && ch <= '9') d += ch; else break;
-      }
-      messageLength = Number(d) || 0;
-    }
-  }
-  // userId2voiceChatInfo: walk braces to find the matching close.
-  let voiceInfo = '';
-  {
-    const k = '\\"userId2voiceChatInfo\\":';
-    const c = region.indexOf(k);
-    if (c >= 0 && region[c + k.length] === '{') {
-      const s = c + k.length;
-      let depth = 0;
-      for (let i = s; i < region.length; i++) {
-        const ch = region[i];
-        if (ch === '{') depth++;
-        else if (ch === '}') {
-          depth--;
-          if (depth === 0) { voiceInfo = region.slice(s, i + 1); break; }
-        }
-      }
-    }
-  }
-  return { _id: id, title, callUserIds, callLimit, update, messageLength, voiceInfo };
+
+  // callLimit / callNum — small integers after their labels. `callNum` is the
+  // occupant count (the site no longer exposes the per-user `callUserIds`).
+  const callLimit = readIntAfter(region, '\\"callLimit\\":') || 0;
+  const callNum = readIntAfter(region, '\\"callNum\\":') || 0;
+
+  return { _id: id, title, callNum, callLimit };
 }
 
 async function fetchRoomById(id) {
@@ -149,7 +106,7 @@ async function fetchRoomById(id) {
 // ---------------------------------------------------------------------------
 // Strategy B: When watching by title, paginate the API list and match exactly.
 //   Used only when TARGET_ID is not set. Keep MAX_PAGES small to fit free-plan
-//   CPU limit.
+//   CPU limit. List-API boards already carry `callNum` and `callLimit`.
 // ---------------------------------------------------------------------------
 
 async function fetchPage(cursor) {
@@ -176,98 +133,6 @@ async function findByTitle(targetTitle, maxPages) {
   return { matched, pages, total };
 }
 
-// ---------------------------------------------------------------------------
-// Chat icons: fetch board/messages and extract (color, char, isHost) per message.
-// We use these to heuristically map UUIDs (call participants) to chat identities.
-// ---------------------------------------------------------------------------
-
-async function fetchChatMessages(boardId) {
-  const res = await fetch(`${API_BASE.replace('/boards/calls', '/board/messages')}?boardId=${boardId}`, {
-    headers: HEADERS,
-  });
-  if (!res.ok) return null;
-  const d = await res.json();
-  return Array.isArray(d.messages) ? d.messages : [];
-}
-
-export function iconKey(icon) {
-  return `${icon.color}|${icon.char}|${icon.isHost ? 1 : 0}`;
-}
-
-export function colorName(hex) {
-  if (!hex) return '';
-  const m = {
-    '#000000': '黒',
-    '#0fb9b1': 'ティール',
-    '#26de81': '緑',
-    '#2bcbba': 'エメグリ',
-    '#2d98da': '青',
-    '#3867d6': '濃青',
-    '#45aaf2': '水色',
-    '#4b6584': '灰青',
-    '#778ca3': 'グレー',
-    '#a55eea': '紫',
-    '#d1d8e0': 'グレー',
-    '#eb3b5a': '紅',
-    '#f7b731': '黄',
-    '#fa8231': 'オレンジ',
-    '#fc5c65': '赤',
-    '#fd9644': 'オレンジ',
-  };
-  return m[hex.toLowerCase()] || hex;
-}
-
-export function renderUuidWithIcon(uuid, mapping, suffixBeforeUuid = '') {
-  const icon = mapping?.[uuid];
-  if (!icon) return `👤 ${uuid}${suffixBeforeUuid}`;
-  const name = icon.char || '';
-  const color = colorName(icon.color);
-  const host = icon.isHost ? ' 👑' : '';
-  // Name first so the user can identify who at a glance; optional suffix
-  // (e.g. "(N回目)") goes between the name and the UUID; UUID at the end
-  // in parens for disambiguation when names collide or are unbound.
-  return `👤 ${color} ${name}${host}${suffixBeforeUuid} (${uuid})`;
-}
-
-// Greedy attribution: if exactly 1 UUID joined this tick AND there is a chat
-// icon that posted only after the join (= new since the previous tick's
-// lastMessageNum, and not previously seen for any in-room UUID), bind them.
-//
-// state shape:
-//   { ..., lastMessageNum: number, uuidToIcon: { [uuid]: {color, char, isHost} } }
-export function attemptAttribution(prev, joined, allMessagesSorted) {
-  const mapping = { ...(prev?.uuidToIcon || {}) };
-  const prevLastNum = Number.isFinite(prev?.lastMessageNum) ? prev.lastMessageNum : 0;
-  const newMessages = allMessagesSorted.filter((m) => Number(m.num) > prevLastNum);
-  // distinct icons in new messages, ordered by first appearance (oldest first)
-  const seen = new Set();
-  const newIcons = [];
-  for (const m of newMessages) {
-    const ic = m.userIcon || m.anonymousIcon;
-    if (!ic || !ic.color || !ic.char) continue;
-    const k = iconKey(ic);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    newIcons.push(ic);
-  }
-  // Exclude icons already mapped to existing UUIDs
-  const usedKeys = new Set(Object.values(mapping).map((i) => iconKey(i)));
-  const candidateIcons = newIcons.filter((i) => !usedKeys.has(iconKey(i)));
-
-  // Only attribute when there's exactly one new joiner and exactly one fresh icon.
-  if (joined.length === 1 && candidateIcons.length === 1) {
-    const ic = candidateIcons[0];
-    mapping[joined[0]] = { color: ic.color, char: ic.char, isHost: !!ic.isHost };
-  }
-
-  // Compute new lastMessageNum (max of any seen number)
-  let lastMessageNum = prevLastNum;
-  for (const m of allMessagesSorted) {
-    if (Number(m.num) > lastMessageNum) lastMessageNum = Number(m.num);
-  }
-  return { mapping, lastMessageNum, candidateIconCount: candidateIcons.length, newMessageCount: newMessages.length };
-}
-
 async function findMatched(env) {
   const targetId = env.TARGET_ID || '';
   const targetTitle = env.TARGET_TITLE || '';
@@ -282,10 +147,14 @@ async function findMatched(env) {
   return { ...r, mode: 'title' };
 }
 
-// Same transition decision as scripts/watch.mjs (priority: ended > becameFull > started > opened)
+// ---------------------------------------------------------------------------
+// Transition decision. Count-based: compares previous vs current occupant
+// count (`callNum`) against the room limit. Priority (high→low):
+//   ended > becameFull > started > opened.
+// Mid-room churn (e.g. 1→2, 3→2) is intentionally NOT a transition.
+// ---------------------------------------------------------------------------
 export function decideTransition(prev, board) {
-  const curUsers = Array.isArray(board.callUserIds) ? board.callUserIds : [];
-  const curNum = curUsers.length;
+  const curNum = Number(board.callNum) || 0;
   const limit = Number(board.callLimit) || 0;
   if (!prev) return null;
   const prevNum = Number.isFinite(prev.callNum) ? prev.callNum : 0;
@@ -302,57 +171,29 @@ export function decideTransition(prev, board) {
   return kind ? { kind, prevNum, curNum, limit } : null;
 }
 
-// Build notification body. Always fires on any callUserIds change.
-// Uses 4 special transition headers when applicable, else a generic 🔵 header.
-// Returns null if there's no actual change (= no notification needed).
-//
-// `mapping`   { [uuid]: {color, char, isHost} } — UUIDs rendered as "uuid (色 苗字)".
-// `joinCount` { [uuid]: number }                 — total joins observed so far,
-//                                                  appended as "(N回目)" on 入室 lines.
-export function buildText(board, decision, prev, mapping, joinCount, durations, now = new Date()) {
+// Build the notification body for one of the 4 transitions. Returns null when
+// there is no transition (so mid-room churn and no-change ticks are silent).
+export function buildText(board, decision, now = new Date()) {
+  if (!decision) return null;
   const url = `https://randomchat.pnyo.jp/groupcall/${board._id}`;
-  const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
-  const prevIds = Array.isArray(prev?.callUserIds) ? prev.callUserIds : [];
   const limit = Number(board.callLimit) || 0;
-  const prevSet = new Set(prevIds);
-  const curSet = new Set(curIds);
-  const joined = curIds.filter((u) => !prevSet.has(u));
-  const left = prevIds.filter((u) => !curSet.has(u));
-  if (joined.length === 0 && left.length === 0) return null;
+  const cur = Number(board.callNum) || 0;
+  const prevNum = decision.prevNum;
 
   let header;
-  if (decision?.kind === 'started') {
-    header = `🟢 「${board.title}」が始まりました\n0 → ${curIds.length}/${limit}`;
-  } else if (decision?.kind === 'becameFull') {
-    header = `🔴 「${board.title}」が満室になりました\n${prevIds.length}/${limit} → 満室(${curIds.length}/${limit})`;
-  } else if (decision?.kind === 'opened') {
-    header = `🟡 「${board.title}」に空きが出ました\n満室(${prevIds.length}/${limit}) → ${curIds.length}/${limit}`;
-  } else if (decision?.kind === 'ended') {
-    header = `⚫ 「${board.title}」の通話が終了しました\n${prevIds.length}/${limit} → 0/${limit}`;
+  if (decision.kind === 'started') {
+    header = `🟢 「${board.title}」が始まりました\n0 → ${cur}/${limit}`;
+  } else if (decision.kind === 'becameFull') {
+    header = `🔴 「${board.title}」が満室になりました\n${prevNum}/${limit} → 満室(${cur}/${limit})`;
+  } else if (decision.kind === 'opened') {
+    header = `🟡 「${board.title}」に空きが出ました\n満室(${prevNum}/${limit}) → ${cur}/${limit}`;
+  } else if (decision.kind === 'ended') {
+    header = `⚫ 「${board.title}」の通話が終了しました\n${prevNum}/${limit} → 0/${limit}`;
   } else {
-    header = `🔵 「${board.title}」 ${prevIds.length}/${limit} → ${curIds.length}/${limit}`;
+    return null;
   }
 
-  const visit = (u) => {
-    const n = (joinCount && joinCount[u]) || 0;
-    return n > 0 ? ` (${n}回目)` : '';
-  };
-  const stay = (u) => {
-    const d = durations && durations[u];
-    if (!d) return '';
-    return ` (滞在 ${formatDuration(d.sessionMs)} / 総 ${formatDuration(d.totalMs)})`;
-  };
-  // Compose: 👤 色 名前 👑 (N回目) (uuid) (滞在 ... / 総 ...)
-  const r = (u, showVisit) => renderUuidWithIcon(u, mapping || {}, showVisit ? visit(u) : '');
-  const lines = [header];
-  for (const u of joined) lines.push(`+ 入室: ${r(u, true)}${stay(u)}`);
-  for (const u of left) lines.push(`- 退室: ${r(u, false)}${stay(u)}`);
-  if (curIds.length > 0) {
-    lines.push(`👥 全員:\n${curIds.map((u) => `  ${r(u, true)}${stay(u)}`).join('\n')}`);
-  }
-  lines.push(url);
-  lines.push(`🕐 ${jstTimeString(now)}`);
-  return lines.join('\n');
+  return [header, url, `🕐 ${jstTimeString(now)}`].join('\n');
 }
 
 // Discord mentions need both an explicit allowed_mentions object AND the
@@ -394,12 +235,6 @@ async function postWebhook(env, text, kind) {
   return res.ok;
 }
 
-// JST calendar date (YYYY-MM-DD) used for daily joinCount reset.
-export function jstDateString(now = new Date()) {
-  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
-  return jst.toISOString().slice(0, 10);
-}
-
 // JST time HH:MM:SS — embedded in each notification body so the user can
 // tell apart messages that Discord groups together as "X minutes ago".
 export function jstTimeString(now = new Date()) {
@@ -407,124 +242,40 @@ export function jstTimeString(now = new Date()) {
   return jst.toISOString().slice(11, 19);
 }
 
-// Human-readable duration: "12秒" / "5分" / "2時間15分" etc.
-export function formatDuration(ms) {
-  const x = Number(ms) || 0;
-  if (x < 60_000) return `${Math.floor(x / 1000)}秒`;
-  if (x < 3_600_000) return `${Math.floor(x / 60_000)}分`;
-  const h = Math.floor(x / 3_600_000);
-  const m = Math.floor((x % 3_600_000) / 60_000);
-  return m === 0 ? `${h}時間` : `${h}時間${m}分`;
-}
-
-// Process a single sample: detect transition vs the in-memory state, send a
-// notification if there is a change, and return the new in-memory state.
-// Does NOT touch KV — caller persists once at end of cron tick.
-//
-// `mapping` is read separately (from the bindings KV key, never written by
-// cron) so that manual binds survive eventual-consistency races with the
-// cron-managed state key.
-async function processSample(env, board, state, loadMapping) {
+// Process a single sample: detect a transition vs the in-memory state, send a
+// notification if one fired, and return the new in-memory state. Does NOT
+// touch KV — the caller persists once at the end of the cron tick, and only
+// when the count/limit actually changed (dirty flag) to stay under the
+// free-plan 1,000 KV-writes/day budget.
+async function processSample(env, board, state) {
   const titleForDisplay = board.title || state?.title || '(タイトル不明)';
-  const curIds = Array.isArray(board.callUserIds) ? board.callUserIds : [];
-  const prevIds = Array.isArray(state?.callUserIds) ? state.callUserIds : [];
-  const prevSet = new Set(prevIds);
-  const curSet = new Set(curIds);
-  const justJoined = curIds.filter((u) => !prevSet.has(u));
-  const justLeft = prevIds.filter((u) => !curSet.has(u));
-  // Track whether anything material changed so we can skip the end-of-tick
-  // KV write when nothing happened — avoids the cost of a JSON deep-compare
-  // and keeps daily KV writes well under the 1,000/day free-plan budget.
-  let dirty = justJoined.length > 0 || justLeft.length > 0;
-
-  // Distinct-days count: each UUID counts +1 for each calendar day (JST) it
-  // appeared. Multiple re-entries within the same day stay at the same count.
-  // So "(3回目)" means "3 distinct days seen", not "3 entries".
-  const today = jstDateString();
-  let dayCount = state?.dayCount;
-  let lastSeenDate = state?.lastSeenDate;
-  // Lazy copy: only clone the maps if we actually need to mutate them.
-  for (const u of justJoined) {
-    if (lastSeenDate?.[u] !== today) {
-      if (!dirty || dayCount === state?.dayCount) {
-        dayCount = { ...(state?.dayCount || {}) };
-        lastSeenDate = { ...(state?.lastSeenDate || {}) };
-      }
-      dayCount[u] = (dayCount[u] || 0) + 1;
-      lastSeenDate[u] = today;
-      dirty = true;
-    }
-  }
-  if (!dayCount) dayCount = state?.dayCount || {};
-  if (!lastSeenDate) lastSeenDate = state?.lastSeenDate || {};
-
-  // Session timing.
-  //   joinedAt[u] = ISO string of when the current (uncompleted) session began
-  //   totalMs[u]  = sum of all completed sessions for u, in ms
-  // Lazy copy: only allocate new maps when we actually mutate. For idle
-  // ticks (no joins, no leaves) we just reuse the references from state.
-  const nowMs = Date.now();
-  const nowIso = new Date(nowMs).toISOString();
-  const oldJoinedAt = state?.joinedAt || {};
-  let joinedAt = oldJoinedAt;
-  let totalMs = state?.totalMs || {};
-  const needsBackfill = curIds.some((u) => !oldJoinedAt[u]);
-  if (justJoined.length > 0 || justLeft.length > 0 || needsBackfill) {
-    joinedAt = { ...oldJoinedAt };
-    totalMs = { ...(state?.totalMs || {}) };
-    for (const u of justLeft) {
-      const ja = Date.parse(oldJoinedAt[u] || '');
-      if (Number.isFinite(ja)) totalMs[u] = (totalMs[u] || 0) + (nowMs - ja);
-      delete joinedAt[u];
-    }
-    for (const u of justJoined) joinedAt[u] = nowIso;
-    for (const u of curIds) if (!joinedAt[u]) joinedAt[u] = nowIso;
-    dirty = true;
-  }
-
-  // Build durations map (only needed if we'll actually send a notification).
-  // Notifications fire only when there's at least one join or leave.
-  let durations = null;
-  if (justJoined.length > 0 || justLeft.length > 0) {
-    durations = {};
-    for (const u of curIds) {
-      const ja = Date.parse(oldJoinedAt[u] || '');
-      const session = Number.isFinite(ja) && !justJoined.includes(u) ? (nowMs - ja) : 0;
-      durations[u] = { sessionMs: session, totalMs: (state?.totalMs?.[u] || 0) + session };
-    }
-    for (const u of justLeft) {
-      const ja = Date.parse(oldJoinedAt[u] || '');
-      const session = Number.isFinite(ja) ? (nowMs - ja) : 0;
-      durations[u] = { sessionMs: session, totalMs: totalMs[u] || 0 };
-    }
-  }
+  const curNum = Number(board.callNum) || 0;
+  const curLimit = Number(board.callLimit) || 0;
+  const prevNum = Number.isFinite(state?.callNum) ? state.callNum : null;
+  const prevLimit = Number.isFinite(state?.callLimit) ? state.callLimit : null;
 
   const decision = decideTransition(state, board);
-  let text = null;
-  if (justJoined.length > 0 || justLeft.length > 0) {
-    // Only load bindings (KV.list + N gets) when we actually need them.
-    const mapping = await loadMapping();
-    text = buildText({ ...board, title: titleForDisplay }, decision, state, mapping, dayCount, durations);
-  }
   let notified = 0;
-  if (text) {
-    const ok = await postWebhook(env, text, decision?.kind || 'change');
-    if (ok) notified = 1;
-    const tag = decision?.kind || 'change';
-    console.log(`[${tag}] ${titleForDisplay} ${prevIds.length}->${curIds.length}/${board.callLimit}`);
+  if (decision) {
+    const text = buildText({ ...board, title: titleForDisplay }, decision);
+    if (text) {
+      const ok = await postWebhook(env, text, decision.kind);
+      if (ok) notified = 1;
+      console.log(`[${decision.kind}] ${titleForDisplay} ${decision.prevNum}->${decision.curNum}/${curLimit}`);
+    }
   }
+
+  // Persist when this is the first observation, or the count / limit changed.
+  // Advancing the stored count keeps transition headers accurate and lets the
+  // next tick compare against a fresh baseline.
+  const dirty = state == null || curNum !== prevNum || curLimit !== prevLimit;
 
   return {
     next: {
       title: board.title || state?.title || '',
-      callUserIds: curIds,
-      callNum: curIds.length,
-      callLimit: Number(board.callLimit) || 0,
-      dayCount,
-      lastSeenDate,
-      joinedAt,
-      totalMs,
-      lastSeenAt: nowIso,
+      callNum: curNum,
+      callLimit: curLimit,
+      lastSeenAt: new Date().toISOString(),
     },
     notified,
     dirty,
@@ -543,36 +294,10 @@ export async function handleCron(env) {
   const SAMPLES = Number(env.SAMPLES_PER_TICK || 4);
   const INTERVAL_MS = Number(env.SAMPLE_INTERVAL_MS || 5000);
 
-  // Load each room's KV state once. We use the room id from env.TARGET_ID for
-  // the ID-watching path; the title-watching path still works but only on the
-  // first sample (we re-find the matched rooms each sample anyway).
   const stateCache = new Map();   // stateKey -> in-memory state
   const stateDirty = new Set();   // stateKeys with material changes that need a write
   let totalNotified = 0;
   let lastPagesInfo = '';
-
-  // Bindings: one KV key per UUID at `room:<id>:binding:<uuid>`. Read once
-  // per cron tick (not per sample) and cached in memory for the rest of the
-  // tick. Per-key storage avoids the KV eventual-consistency races we hit
-  // with a single aggregated bindings key.
-  const bindingCache = new Map();   // boardId -> { uuid -> {color,char,isHost} }
-  async function loadBindings(boardId) {
-    if (bindingCache.has(boardId)) return bindingCache.get(boardId);
-    const prefix = `room:${boardId}:binding:`;
-    const out = {};
-    let cursor;
-    do {
-      const list = await env.STATE.list({ prefix, cursor });
-      for (const k of list.keys) {
-        const uuid = k.name.slice(prefix.length);
-        const v = await env.STATE.get(k.name);
-        if (v) try { out[uuid] = JSON.parse(v); } catch {}
-      }
-      cursor = list.list_complete ? undefined : list.cursor;
-    } while (cursor);
-    bindingCache.set(boardId, out);
-    return out;
-  }
 
   for (let i = 0; i < SAMPLES; i++) {
     if (i > 0) await sleep(INTERVAL_MS);
@@ -591,23 +316,16 @@ export async function handleCron(env) {
         const raw = await env.STATE.get(stateKey);
         state = raw ? JSON.parse(raw) : null;
       }
-      // Bindings are only needed when we actually emit a notification, so
-      // defer the KV.list + per-key gets to inside processSample's notify
-      // path. For idle ticks this saves ~30 KV ops worth of CPU.
-      const loadMapping = () => loadBindings(board._id);
-      const { next, notified, dirty } = await processSample(env, board, state, loadMapping);
+      const { next, notified, dirty } = await processSample(env, board, state);
       totalNotified += notified;
       stateCache.set(stateKey, next);
       if (dirty) stateDirty.add(stateKey);
     }
   }
 
-  // Persist at the end, but ONLY for rooms whose state actually changed
-  // materially. processSample sets `dirty` when there was a join/leave, a
-  // dayCount bump, a session close, or a ghost-visit increment. Skipping
-  // writes when nothing happened keeps daily KV writes well under the
-  // free-plan 1,000/day cap and avoids extra CPU spent on big JSON
-  // comparisons.
+  // Persist at the end, but ONLY for rooms whose count/limit actually changed.
+  // Skipping writes when nothing happened keeps daily KV writes well under the
+  // free-plan 1,000/day cap.
   let writes = 0;
   let skipped = 0;
   for (const [stateKey, state] of stateCache) {

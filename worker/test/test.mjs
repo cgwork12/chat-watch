@@ -1,27 +1,31 @@
-// Unit tests for the worker's transition logic + SSR HTML extractor + buildText.
-import { decideTransition, extractRoomFromHtml, buildText, attemptAttribution, renderUuidWithIcon, colorName, inferAllowedMentions, jstDateString, jstTimeString, formatDuration } from '../src/index.js';
+// Unit tests for the worker's count-based transition logic + SSR HTML
+// extractor + buildText. (The site removed the per-user `callUserIds` list in
+// 2026-07, so everything is count-based on `callNum` now.)
+import { decideTransition, extractRoomFromHtml, buildText, inferAllowedMentions, jstTimeString } from '../src/index.js';
 
-const board = (id, title, n, limit) => ({
-  _id: id, title, callUserIds: Array(n).fill('x'), callLimit: limit,
-});
+// A "board" now only needs a count + limit.
+const board = (id, title, n, limit) => ({ _id: id, title, callNum: n, callLimit: limit });
 const prev = (n, limit, title = 't') => ({ callNum: n, callLimit: limit, title });
 
+let pass = 0, fail = 0;
+
+// ---------- decideTransition ----------
 const cases = [
-  ['no prev (first sight)', null, board('a','t',1,5), null],
-  ['started 0->1', prev(0,5), board('a','t',1,5), 'started'],
-  ['becameFull 4->5', prev(4,5), board('a','t',5,5), 'becameFull'],
-  ['becameFull 0->5 (beats started)', prev(0,5), board('a','t',5,5), 'becameFull'],
-  ['opened 5->4', prev(5,5), board('a','t',4,5), 'opened'],
-  ['ended 1->0', prev(1,5), board('a','t',0,5), 'ended'],
-  ['ended 5->0 (beats opened)', prev(5,5), board('a','t',0,5), 'ended'],
-  ['no-op 1->2', prev(1,5), board('a','t',2,5), null],
-  ['no-op 0->0', prev(0,5), board('a','t',0,5), null],
-  ['no-op 5->5', prev(5,5), board('a','t',5,5), null],
+  ['no prev (first sight)', null, board('a', 't', 1, 5), null],
+  ['started 0->1', prev(0, 5), board('a', 't', 1, 5), 'started'],
+  ['becameFull 4->5', prev(4, 5), board('a', 't', 5, 5), 'becameFull'],
+  ['becameFull 0->5 (beats started)', prev(0, 5), board('a', 't', 5, 5), 'becameFull'],
+  ['opened 5->4', prev(5, 5), board('a', 't', 4, 5), 'opened'],
+  ['ended 1->0', prev(1, 5), board('a', 't', 0, 5), 'ended'],
+  ['ended 5->0 (beats opened)', prev(5, 5), board('a', 't', 0, 5), 'ended'],
+  ['no-op 1->2 (mid-room churn)', prev(1, 5), board('a', 't', 2, 5), null],
+  ['no-op 3->2 (mid-room churn)', prev(3, 5), board('a', 't', 2, 5), null],
+  ['no-op 0->0', prev(0, 5), board('a', 't', 0, 5), null],
+  ['no-op 5->5', prev(5, 5), board('a', 't', 5, 5), null],
   // user's exact scenario
-  ['user scenario: 5/5 -> 3/5 should fire opened', prev(5,5), board('a','ながら雑談',3,5), 'opened'],
+  ['user scenario: 5/5 -> 3/5 should fire opened', prev(5, 5), board('a', 'ながら雑談', 3, 5), 'opened'],
 ];
 
-let pass = 0, fail = 0;
 for (const [label, p, b, expected] of cases) {
   const d = decideTransition(p, b);
   const got = d ? d.kind : null;
@@ -29,18 +33,16 @@ for (const [label, p, b, expected] of cases) {
   console.log(`${ok ? '✅' : '❌'} ${label}: expected=${expected}, got=${got}`);
   if (ok) pass++; else fail++;
 }
-// ---------- extractRoomFromHtml ----------
 
+// ---------- extractRoomFromHtml ----------
 function fakeBoardJson(id, title, n, limit) {
   // Build an escaped JSON string the way Next.js __next_f.push embeds it.
-  const uuids = Array.from({ length: n }, (_, i) =>
-    `${'0'.repeat(8)}-aaaa-bbbb-cccc-${String(i).padStart(12, '0')}`,
-  );
-  const inner =
+  // Field order mirrors the real page: title, category, ..., callLimit, callNum.
+  return (
     `\\"_id\\":\\"${id}\\",\\"title\\":\\"${title}\\",\\"category\\":\\"call\\",` +
-    `\\"callUserIds\\":[${uuids.map((u) => `\\"${u}\\"`).join(',')}],` +
-    `\\"callLimit\\":${limit}`;
-  return inner;
+    `\\"callLimit\\":${limit},\\"hasPassword\\":false,\\"messageLength\\":42,` +
+    `\\"callNum\\":${n}`
+  );
 }
 
 const id = '699244bce7401621a87adf10';
@@ -55,9 +57,13 @@ const htmlCases = [
     `<html>... ${fakeBoardJson(otherId, 'other', 2, 5)} ...</html>`,
     null],
 
-  ['empty callUserIds',
+  ['empty room (callNum 0)',
     `<html>... ${fakeBoardJson(id, 'empty', 0, 5)} ...</html>`,
     { title: 'empty', n: 0, limit: 5 }],
+
+  ['full room (callNum == limit)',
+    `<html>... ${fakeBoardJson(id, 'full', 5, 5)} ...</html>`,
+    { title: 'full', n: 5, limit: 5 }],
 
   ['title with newline (escaped)',
     `<html>... ${fakeBoardJson(id, 'line1\\nline2', 1, 3)} ...</html>`,
@@ -78,63 +84,43 @@ for (const [label, html, expected] of htmlCases) {
   if (expected === null) {
     ok = r === null;
   } else {
-    ok = r && r.title === expected.title && r.callUserIds.length === expected.n && r.callLimit === expected.limit;
+    ok = r && r.title === expected.title && r.callNum === expected.n && r.callLimit === expected.limit;
   }
-  console.log(`${ok ? '✅' : '❌'} ${label}: expected=${JSON.stringify(expected)}, got=${r ? JSON.stringify({ title: r.title, n: r.callUserIds.length, limit: r.callLimit }) : null}`);
+  console.log(`${ok ? '✅' : '❌'} ${label}: expected=${JSON.stringify(expected)}, got=${r ? JSON.stringify({ title: r.title, n: r.callNum, limit: r.callLimit }) : null}`);
   if (ok) pass++; else fail++;
 }
 
-// ---------- buildText (unified notification builder) ----------
-
-function makeBoard(uuids, limit, title = 't') {
-  return { _id: 'roomid', title, callUserIds: uuids, callLimit: limit };
-}
-function makePrev(uuids, limit, title = 't') {
-  return { callUserIds: uuids, callNum: uuids.length, callLimit: limit, title };
-}
-const u = (n) => `${'a'.repeat(8)}-bbbb-cccc-dddd-${String(n).padStart(12, '0')}`;
-const v = (c, n) => `${c.repeat(8)}-bbbb-cccc-dddd-${String(n).padStart(12, '0')}`;
+// ---------- buildText (count-based, 4 transitions only) ----------
+const bd = (n, limit, title = 't', _id = 'roomid') => ({ _id, title, callNum: n, callLimit: limit });
 
 const textCases = [
-  ['no change -> null',
-    () => buildText(makeBoard([u(1), u(2)], 5), null, makePrev([u(1), u(2)], 5)),
+  ['no transition -> null',
+    () => buildText(bd(2, 5), null),
     null],
 
-  ['started uses 🟢 wording with full UUIDs',
-    () => buildText(makeBoard([u(1)], 5),
-      { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
-      makePrev([], 5)),
-    [/🟢.*が始まりました/, new RegExp(`\\+ 入室: 👤 ${u(1)}`), /👥 全員:/]],
+  ['started uses 🟢 wording',
+    () => buildText(bd(1, 5, 'ながら雑談'), { kind: 'started', prevNum: 0, curNum: 1, limit: 5 }),
+    [/🟢.*「ながら雑談」が始まりました/, /0 → 1\/5/]],
 
   ['becameFull uses 🔴 wording',
-    () => buildText(makeBoard([u(1), u(2), u(3), u(4), u(5)], 5),
-      { kind: 'becameFull', prevNum: 4, curNum: 5, limit: 5 },
-      makePrev([u(1), u(2), u(3), u(4)], 5)),
-    [/🔴.*が満室になりました/, new RegExp(`\\+ 入室: 👤 ${u(5)}`), /4\/5 → 満室\(5\/5\)/]],
+    () => buildText(bd(5, 5), { kind: 'becameFull', prevNum: 4, curNum: 5, limit: 5 }),
+    [/🔴.*が満室になりました/, /4\/5 → 満室\(5\/5\)/]],
 
-  ['opened uses 🟡 wording with leavers',
-    () => buildText(makeBoard([u(1), u(2), u(3)], 5),
-      { kind: 'opened', prevNum: 5, curNum: 3, limit: 5 },
-      makePrev([u(1), u(2), u(3), u(4), u(5)], 5)),
-    [/🟡.*に空きが出ました/, new RegExp(`- 退室: 👤 ${u(4)}`), new RegExp(`- 退室: 👤 ${u(5)}`)]],
+  ['opened uses 🟡 wording',
+    () => buildText(bd(3, 5), { kind: 'opened', prevNum: 5, curNum: 3, limit: 5 }),
+    [/🟡.*に空きが出ました/, /満室\(5\/5\) → 3\/5/]],
 
-  ['ended uses ⚫ wording with full UUIDs of leavers',
-    () => buildText(makeBoard([], 5),
-      { kind: 'ended', prevNum: 2, curNum: 0, limit: 5 },
-      makePrev([u(1), u(2)], 5)),
-    [/⚫.*の通話が終了しました/, new RegExp(`- 退室: 👤 ${u(1)}`), /2\/5 → 0\/5/]],
+  ['ended uses ⚫ wording',
+    () => buildText(bd(0, 5), { kind: 'ended', prevNum: 2, curNum: 0, limit: 5 }),
+    [/⚫.*の通話が終了しました/, /2\/5 → 0\/5/]],
 
-  ['middle change (1 -> 2) uses 🔵 generic header',
-    () => buildText(makeBoard([u(1), u(2)], 5), null, makePrev([u(1)], 5)),
-    [/🔵.*1\/5 → 2\/5/, new RegExp(`\\+ 入室: 👤 ${u(2)}`)]],
+  ['includes room URL',
+    () => buildText(bd(1, 5, 't', 'abc123'), { kind: 'started', prevNum: 0, curNum: 1, limit: 5 }),
+    [/https:\/\/randomchat\.pnyo\.jp\/groupcall\/abc123/]],
 
-  ['middle leave (3 -> 2) uses 🔵',
-    () => buildText(makeBoard([u(1), u(2)], 5), null, makePrev([u(1), u(2), u(3)], 5)),
-    [/🔵.*3\/5 → 2\/5/, new RegExp(`- 退室: 👤 ${u(3)}`)]],
-
-  ['simultaneous swap (count unchanged) still notifies',
-    () => buildText(makeBoard([v('a', 1), v('c', 2)], 5), null, makePrev([v('a', 1), v('b', 2)], 5)),
-    [/🔵.*2\/5 → 2\/5/, new RegExp(`\\+ 入室: 👤 ${v('c', 2)}`), new RegExp(`- 退室: 👤 ${v('b', 2)}`)]],
+  ['does NOT contain per-user lines anymore',
+    () => buildText(bd(1, 5), { kind: 'started', prevNum: 0, curNum: 1, limit: 5 }),
+    [/^(?!.*入室)(?!.*全員)[\s\S]*$/]],
 ];
 
 for (const [label, gen, expected] of textCases) {
@@ -153,136 +139,13 @@ for (const [label, gen, expected] of textCases) {
   if (ok) pass++; else fail++;
 }
 
-// ---------- attemptAttribution ----------
-
-const mkMsg = (num, color, char, isHost = false) => ({
-  num, create: '2026-05-01T00:00:00Z',
-  userIcon: { color, char, isHost },
-});
-
-const attribCases = [
-  ['1 join + 1 fresh icon -> mapped',
-    { lastMessageNum: 100, uuidToIcon: {} },
-    [u(1)],
-    [mkMsg(100, '#0fb9b1', '渡辺'), mkMsg(101, '#0fb9b1', '渡辺')],   // last seen num 100, msg 101 is new
-    (r) => r.mapping[u(1)]?.char === '渡辺' && r.mapping[u(1)]?.color === '#0fb9b1'],
-
-  ['1 join but no new chat -> not mapped',
-    { lastMessageNum: 100, uuidToIcon: {} },
-    [u(1)],
-    [mkMsg(100, '#0fb9b1', '渡辺')],   // nothing newer than 100
-    (r) => !r.mapping[u(1)]],
-
-  ['2 joiners + 1 new icon -> ambiguous, not mapped',
-    { lastMessageNum: 100, uuidToIcon: {} },
-    [u(1), u(2)],
-    [mkMsg(101, '#2d98da', '鈴木')],
-    (r) => !r.mapping[u(1)] && !r.mapping[u(2)]],
-
-  ['existing icon already mapped -> next joiner not falsely linked',
-    { lastMessageNum: 100, uuidToIcon: { [u(0)]: { color: '#0fb9b1', char: '渡辺', isHost: false } } },
-    [u(1)],
-    [mkMsg(101, '#0fb9b1', '渡辺')],   // only icon is the already-mapped one; no candidate left
-    (r) => !r.mapping[u(1)]],
-
-  ['lastMessageNum is updated to max',
-    { lastMessageNum: 100, uuidToIcon: {} },
-    [],
-    [mkMsg(105, '#0fb9b1', 'A'), mkMsg(110, '#fc5c65', 'B')],
-    (r) => r.lastMessageNum === 110],
-];
-
-for (const [label, prev, joined, msgs, check] of attribCases) {
-  const r = attemptAttribution(prev, joined, msgs);
-  const ok = check(r);
-  console.log(`${ok ? '✅' : '❌'} attrib: ${label}`);
-  if (!ok) console.log('   ', JSON.stringify(r, null, 2).slice(0, 400));
-  if (ok) pass++; else fail++;
-}
-
-// ---------- renderUuidWithIcon / colorName ----------
+// ---------- buildText ends with 🕐 HH:MM:SS (JST) ----------
 {
-  const m = { [u(1)]: { color: '#0fb9b1', char: '渡辺', isHost: false }, [u(2)]: { color: '#d1d8e0', char: '主', isHost: true } };
-  const r1 = renderUuidWithIcon(u(1), m);
-  const r2 = renderUuidWithIcon(u(2), m);
-  const r3 = renderUuidWithIcon(u(99), m);  // no mapping
-  const ok1 = r1.includes(u(1)) && r1.includes('ティール') && r1.includes('渡辺');
-  const ok2 = r2.includes(u(2)) && r2.includes('グレー') && r2.includes('主') && r2.includes('👑');
-  const ok3 = r3 === `👤 ${u(99)}`;
-  console.log(`${ok1 ? '✅' : '❌'} render: mapped renders "色 名前"  ->  ${r1}`);
-  console.log(`${ok2 ? '✅' : '❌'} render: host adds 👑           ->  ${r2}`);
-  console.log(`${ok3 ? '✅' : '❌'} render: unmapped returns raw uuid  ->  ${r3}`);
-  if (ok1) pass++; else fail++;
-  if (ok2) pass++; else fail++;
-  if (ok3) pass++; else fail++;
-}
-
-// buildText with mapping
-{
-  const m = { [u(1)]: { color: '#0fb9b1', char: '渡辺', isHost: false } };
-  const t = buildText(makeBoard([u(1)], 5),
-    { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
-    makePrev([], 5),
-    m);
-  const ok = /\+ 入室:.*ティール 渡辺/.test(t);
-  console.log(`${ok ? '✅' : '❌'} buildText with mapping renders icon next to UUID`);
-  if (!ok) { console.log('   ', t.replace(/\n/g, '\n    ')); }
-  if (ok) pass++; else fail++;
-}
-
-// dayCount rendering ("(N回目)" = N distinct days seen)
-{
-  const m = { [u(1)]: { color: '#0fb9b1', char: '渡辺', isHost: false } };
-  const t = buildText(makeBoard([u(1)], 5),
-    { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
-    makePrev([], 5),
-    m,
-    { [u(1)]: 3 });
-  const ok = /\+ 入室:.*\(3回目\)/.test(t);
-  console.log(`${ok ? '✅' : '❌'} buildText: 入室 shows "(N回目)"`);
+  const t = buildText(bd(1, 5), { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
+    new Date('2026-05-13T06:32:15Z'));
+  const ok = /🕐 15:32:15$/.test(t);
+  console.log(`${ok ? '✅' : '❌'} buildText: ends with 🕐 HH:MM:SS in JST`);
   if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
-  if (ok) pass++; else fail++;
-}
-
-// dayCount is shown in 全員 list too (not just on 入室 line)
-{
-  const t = buildText(makeBoard([u(1), u(2), u(3)], 5),
-    null,
-    makePrev([u(1), u(2)], 5),  // u(3) just joined, u(1)+u(2) already there
-    {},
-    { [u(1)]: 5, [u(2)]: 2, [u(3)]: 1 });
-  // each 全員 line should carry (N回目). The line format is roughly
-  //   "  👤 <uuid> ... (N回目) ..."
-  const ok = /\(5回目\)/.test(t) && /\(2回目\)/.test(t) && /\(1回目\)/.test(t);
-  console.log(`${ok ? '✅' : '❌'} buildText: 全員 list also shows "(N回目)" per user`);
-  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
-  if (ok) pass++; else fail++;
-}
-
-{
-  // 退室 should NOT show count
-  const t = buildText(makeBoard([], 5),
-    { kind: 'ended', prevNum: 1, curNum: 0, limit: 5 },
-    makePrev([u(1)], 5),
-    {}, { [u(1)]: 5 });
-  const ok = !/\(5回目\)/.test(t) && /- 退室:/.test(t);
-  console.log(`${ok ? '✅' : '❌'} buildText: 退室 has no (N回目)`);
-  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
-  if (ok) pass++; else fail++;
-}
-
-{
-  // joinCount=0 (or absent) → no suffix
-  const t = buildText(makeBoard([u(1), u(2)], 5),
-    null,
-    makePrev([u(1)], 5),
-    {}, { [u(1)]: 1 });
-  // u(2) joined this tick, has no joinCount entry yet → no suffix
-  const lines = t.split('\n');
-  const joinLine = lines.find((l) => l.startsWith('+ 入室:'));
-  const ok = joinLine && !/\(\d+回目\)/.test(joinLine);
-  console.log(`${ok ? '✅' : '❌'} buildText: 入室 with joinCount=0 omits suffix`);
-  if (!ok) console.log('   joinLine=', joinLine);
   if (ok) pass++; else fail++;
 }
 
@@ -308,58 +171,6 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
   }
 }
 
-// ---------- formatDuration ----------
-{
-  const cases = [
-    [0, '0秒'],
-    [15_000, '15秒'],
-    [59_999, '59秒'],
-    [60_000, '1分'],
-    [600_000, '10分'],
-    [3_600_000, '1時間'],
-    [3_661_000, '1時間1分'],
-    [7_320_000, '2時間2分'],
-  ];
-  for (const [ms, want] of cases) {
-    const got = formatDuration(ms);
-    const ok = got === want;
-    console.log(`${ok ? '✅' : '❌'} formatDuration(${ms}) -> ${got} (want ${want})`);
-    if (ok) pass++; else fail++;
-  }
-}
-
-// buildText: 滞在 / 総 のセクションが入っているか
-{
-  // started: prev empty, cur has u(1). The line should show "(0秒 / 総 2時間2分)".
-  const durations = { [u(1)]: { sessionMs: 0, totalMs: 7_320_000 } };
-  const t = buildText(makeBoard([u(1)], 5),
-    { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
-    makePrev([], 5),
-    {},
-    { [u(1)]: 3 },
-    durations,
-    new Date('2026-05-13T06:32:15Z'));
-  const ok = /\+ 入室:.*\(3回目\).*\(滞在 0秒 \/ 総 2時間2分\)/.test(t);
-  console.log(`${ok ? '✅' : '❌'} buildText: 入室 line shows session + total`);
-  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
-  if (ok) pass++; else fail++;
-}
-{
-  // ended: prev has u(1), cur empty. The 退室 line should carry the final session length.
-  const durations = { [u(1)]: { sessionMs: 90_000, totalMs: 7_320_000 } };
-  const t = buildText(makeBoard([], 5),
-    { kind: 'ended', prevNum: 1, curNum: 0, limit: 5 },
-    makePrev([u(1)], 5),
-    {},
-    { [u(1)]: 3 },
-    durations,
-    new Date('2026-05-13T06:32:15Z'));
-  const ok = /- 退室:.*\(滞在 1分 \/ 総 2時間2分\)/.test(t);
-  console.log(`${ok ? '✅' : '❌'} buildText: 退室 line shows final session + total`);
-  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
-  if (ok) pass++; else fail++;
-}
-
 // ---------- jstTimeString ----------
 {
   // 06:32:15 UTC -> 15:32:15 JST
@@ -369,36 +180,5 @@ for (const [label, prev, joined, msgs, check] of attribCases) {
   if (ok) pass++; else fail++;
 }
 
-// buildText now appends 🕐 HH:MM:SS at the end
-{
-  const t = buildText(makeBoard([u(1)], 5),
-    { kind: 'started', prevNum: 0, curNum: 1, limit: 5 },
-    makePrev([], 5),
-    {}, { [u(1)]: 1 },
-    {},  // durations
-    new Date('2026-05-13T06:32:15Z'));
-  const ok = /🕐 15:32:15$/.test(t);
-  console.log(`${ok ? '✅' : '❌'} buildText: ends with 🕐 HH:MM:SS in JST`);
-  if (!ok) console.log('   ', t.replace(/\n/g, '\n    '));
-  if (ok) pass++; else fail++;
-}
-
-// ---------- jstDateString ----------
-{
-  // Around UTC midnight, JST should already be 9 AM next day
-  const utcMidnight = new Date('2026-05-02T00:00:00Z');
-  const jstDate = jstDateString(utcMidnight);
-  const ok1 = jstDate === '2026-05-02';
-  console.log(`${ok1 ? '✅' : '❌'} jstDateString: 00:00 UTC -> 09:00 JST same day -> ${jstDate}`);
-  if (ok1) pass++; else fail++;
-
-  // 15:00 UTC = 00:00 JST next day -> date should be next day
-  const utcAfternoon = new Date('2026-05-01T15:00:00Z');
-  const jstDate2 = jstDateString(utcAfternoon);
-  const ok2 = jstDate2 === '2026-05-02';
-  console.log(`${ok2 ? '✅' : '❌'} jstDateString: 15:00 UTC -> 00:00 JST next day -> ${jstDate2}`);
-  if (ok2) pass++; else fail++;
-}
-
-console.log(`\n${pass}/${pass+fail} passed`);
+console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail === 0 ? 0 : 1);
